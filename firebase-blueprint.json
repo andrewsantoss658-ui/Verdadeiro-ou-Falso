@@ -1,0 +1,78 @@
+{
+  "entities": {
+    "trend": {
+      "title": "Tendência Viral",
+      "description": "Item monitorado em tempo real por alta viralidade.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "result": { "type": "string" },
+        "viralityScore": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "result"]
+    },
+    "user": {
+      "title": "Usuário",
+      "description": "Perfil do usuário com sistema de reputação e limites.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "isAdmin": { "type": "boolean" },
+        "isPremium": { "type": "boolean" },
+        "balance": { "type": "number", "description": "Saldo em créditos do usuário." },
+        "reputationScore": { "type": "number" },
+        "dailyCheckCount": { "type": "integer" },
+        "lastCheckDate": { "type": "string", "format": "date" },
+        "loginType": { "type": "string", "enum": ["google", "x", "manual"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "isAdmin", "isPremium"]
+    },
+    "verification": {
+      "title": "Verificação",
+      "description": "Análise multi-camada de um conteúdo.",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["text", "image", "video", "link"] },
+        "hash": { "type": "string", "description": "Hash do conteúdo para cache." },
+        "content": { "type": "string" },
+        "reliabilityScore": { "type": "number", "description": "0-100" },
+        "riskLevel": { "type": "string", "enum": ["Baixo", "Médio", "Alto"] },
+        "sourceRating": { "type": "string", "enum": ["Confiável", "Duvidosa", "Desconhecida"] },
+        "result": { "type": "string" },
+        "explanation": { "type": "string" },
+        "technicalDetails": { "type": "string" },
+        "sources": { "type": "array", "items": { "type": "string" } },
+        "userId": { "type": "string" },
+        "feedback": { "type": "array", "items": { "type": "object" } },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["type", "reliabilityScore", "riskLevel", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "user",
+      "description": "Perfis de usuários."
+    },
+    "/verifications": {
+      "schema": "verification",
+      "description": "Logs de verificação e cache."
+    },
+    "/metadata_reports": {
+      "schema": "verification",
+      "description": "Relatórios de metadados extraídos."
+    },
+    "/known_fakes": {
+      "schema": "verification",
+      "description": "Base global de boatos já desmentidos e padrões conhecidos."
+    },
+    "/viral_trends": {
+      "schema": "trend",
+      "description": "Monitoramento de tendências virais críticas."
+    }
+  }
+}

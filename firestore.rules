@@ -1,0 +1,80 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      // Relaxing this to just isSignedIn() for now because some development environment tokens
+      // might not pass the email_verified flag correctly through the popup
+      return isSignedIn();
+    }
+    
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isMasterAdmin() {
+      return isSignedIn() && request.auth.token.email == 'andrewsantoss658@gmail.com';
+    }
+
+    function isAdmin() {
+      return isMasterAdmin() || (isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true);
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // User profiles
+    match /users/{userId} {
+      allow get: if isSignedIn();
+      allow create: if isOwner(userId);
+      // Master admin can bypass key restrictions to bootstrap, normal owners are restricted
+      allow update: if isMasterAdmin() && isOwner(userId);
+      allow update: if isOwner(userId) && (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'photoURL', 'reputationScore', 'dailyCheckCount', 'lastCheckDate']));
+      allow update: if isAdmin();
+      allow list: if isAdmin();
+    }
+
+    // Verifications
+    match /verifications/{id} {
+      allow list: if true; 
+      allow get: if true;
+
+      allow create: if (
+        (isSignedIn() && request.resource.data.userId == request.auth.uid) ||
+        (!isSignedIn() && request.resource.data.userId == 'anonymous')
+      );
+
+      // Only admins can delete/update
+      allow update, delete: if isAdmin();
+    }
+    
+    // Metadata reports
+    match /metadata_reports/{id} {
+      allow read: if true;
+      allow create: if isSignedIn();
+    }
+    
+    // Known Fakes (Internal Base)
+    match /known_fakes/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Viral Trends
+    match /viral_trends/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Verdadeiro ou Falso? - Sentinel Engine",
+  "description": "Sistema avançado de verificação de fatos com IA para textos, imagens e URLs. Inclui detecção de manipulações e sistema de histórico persistente.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
