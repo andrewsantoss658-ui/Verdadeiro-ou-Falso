@@ -88,9 +88,8 @@ service cloud.firestore {
     match /verifications/{verifyId} {
       allow read: if true;
       
-      allow create: if isSignedIn() 
-          && isValidVerification(incoming())
-          && (incoming().userId == request.auth.uid);
+      allow create: if isValidVerification(incoming())
+          && (incoming().userId == "anonymous" || (isSignedIn() && incoming().userId == request.auth.uid));
 
       allow update, delete: if isAdmin();
     }

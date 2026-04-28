@@ -4,34 +4,22 @@ import { motion, AnimatePresence } from "motion/react";
 import { GoogleGenAI } from "@google/genai";
 import { initializeApp } from "firebase/app";
 import { 
+  getAuth
+} from "firebase/auth";
+import { 
   getFirestore, 
   collection, 
   addDoc, 
   query, 
-  where, 
   orderBy, 
   limit, 
   getDocs,
-  getDoc,
-  setDoc,
   Timestamp,
   doc,
   getDocFromServer,
   updateDoc,
-  arrayUnion,
   serverTimestamp
 } from "firebase/firestore";
-import { 
-  getAuth, 
-  signInWithPopup, 
-  GoogleAuthProvider, 
-  onAuthStateChanged,
-  signOut,
-  User,
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword,
-  updateProfile
-} from "firebase/auth";
 import firebaseConfig from "../firebase-applet-config.json";
 import { 
   Search, 
@@ -49,7 +37,6 @@ import {
   Link as LinkIcon,
   Upload,
   User as UserIcon,
-  LogOut,
   LayoutGrid,
   ExternalLink,
   ChevronRight,
@@ -81,9 +68,7 @@ import { SiteLogo } from "./components/SiteLogo";
 
 // Initialize Firebase
 const firebaseApp = initializeApp(firebaseConfig);
-const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
-const googleProvider = new GoogleAuthProvider();
 
 // Initialize Gemini
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
@@ -112,13 +97,15 @@ interface FirestoreErrorInfo {
 }
 
 const handleFirestoreError = (error: unknown, operationType: OperationType, path: string | null) => {
+  const auth = getAuth();
+  const user = auth.currentUser;
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
+      userId: user?.uid || "anonymous",
+      email: user?.email || null,
+      emailVerified: user?.emailVerified || null,
+      isAnonymous: user?.isAnonymous || true,
     },
     operationType,
     path
@@ -127,7 +114,7 @@ const handleFirestoreError = (error: unknown, operationType: OperationType, path
   throw new Error(JSON.stringify(errInfo));
 };
 
-type ViewMode = "dashboard" | "history" | "investigator" | "admin" | "support" | "settings" | "api" | "terms" | "privacy" | "status" | "api_docs" | "profile";
+type ViewMode = "dashboard" | "history" | "investigator" | "support" | "settings" | "api" | "terms" | "privacy" | "status" | "api_docs";
 type Theme = "light" | "dark" | "system";
 
 interface Verification {
@@ -148,42 +135,12 @@ interface Verification {
   feedbackVotes?: { up: number, down: number };
 }
 
-interface Transaction {
-  id: string;
-  date: any;
-  amount: number;
-  type: "acquired" | "consumed" | "adjustment";
-  description: string;
-}
-
-interface UserProfile {
-  uid: string;
-  email: string;
-  displayName: string;
-  fullName?: string;
-  birthDate?: string;
-  photoURL: string;
-  isAdmin?: boolean;
-  isPremium?: boolean;
-  reputationScore: number;
-  loginType: "google" | "manual";
-  balance?: number;
-  createdAt: any;
-  transactions?: Transaction[];
-}
-
 export default function App() {
   const [view, setView] = useState<ViewMode>("dashboard");
   const [activeTab, setActiveTab] = useState<VerificationType>("text");
   const [imageAnalysisMode, setImageAnalysisMode] = useState<"visual" | "ocr">("visual");
   const [theme, setTheme] = useState<Theme>((localStorage.getItem("sentinel_theme") as Theme) || "system");
   
-  // Admin Data
-  const [adminUsers, setAdminUsers] = useState<any[]>([]);
-  const [searchTerm, setSearchTerm] = useState("");
-  const [adminFilters, setAdminFilters] = useState({ premium: "all", loginType: "all" });
-  const [adminSubView, setAdminSubView] = useState<"users" | "trends">("users");
-
   // Inputs
   const [inputText, setInputText] = useState("");
   const [urlInput, setUrlInput] = useState("");
@@ -194,19 +151,8 @@ export default function App() {
   const [result, setResult] = useState<Verification | null>(null);
   const [history, setHistory] = useState<Verification[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [user, setUser] = useState<UserProfile | null>(null);
   const [checkCount, setCheckCount] = useState(0);
   const [viralTrends, setViralTrends] = useState<any[]>([]);
-
-  // Manual Auth States
-  const [showAuthModal, setShowAuthModal] = useState(false);
-  const [authMethod, setAuthMethod] = useState<"login" | "signup">("login");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [manualDisplayName, setManualDisplayName] = useState("");
-  const [birthDate, setBirthDate] = useState("");
-  const [authLoading, setAuthLoading] = useState(false);
 
   // Notifications
   const [notifications, setNotifications] = useState<{ id: string, message: string, type: "success" | "error" | "info" }[]>([]);
@@ -234,125 +180,15 @@ export default function App() {
     testConnection();
     
     fetchViralTrends();
-    const interval = setInterval(fetchViralTrends, 300000); // 5 min
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchViralTrends = async () => {
-    const path = "viral_trends";
-    try {
-      const q = query(collection(db, path), orderBy("updatedAt", "desc"), limit(5));
-      const snap = await getDocs(q);
-      if (snap.empty) {
-        // Fallback or Initial Data
-        setViralTrends([
-          { title: "Alimento X causa cura milagrosa", result: "Falso", viralityScore: 92 },
-          { title: "Novo imposto sobre herança aprovado", result: "Manipulado", viralityScore: 75 }
-        ]);
-      } else {
-        setViralTrends(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-      }
-    } catch (e) {
-      if (e instanceof Error && (e.message.includes("permission") || e.message.includes("denied"))) {
-        handleFirestoreError(e, OperationType.LIST, path);
-      }
-      console.error("Erro ao carregar tendências");
-    }
-  };
-
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (u) => {
-      const usersPath = "users";
-      try {
-        if (u) {
-          // Fetch/Sync User Profile using Doc ID = UID
-          const userRef = doc(db, usersPath, u.uid);
-          let userSnap;
-          try {
-            userSnap = await getDoc(userRef);
-          } catch (e) {
-            handleFirestoreError(e, OperationType.GET, `${usersPath}/${u.uid}`);
-            return;
-          }
-          
-          const isMasterAdmin = u.email === "andrewsantoss658@gmail.com";
-          const identifiedLoginType = u.providerData[0]?.providerId === "google.com" ? "google" : "manual";
-          
-          let profile: UserProfile;
-          if (!userSnap.exists()) {
-            const signupName = localStorage.getItem("sentinel_signup_name");
-            const signupBirth = localStorage.getItem("sentinel_signup_birth");
-            
-            const newProfile: UserProfile = {
-              uid: u.uid,
-              email: u.email!,
-              displayName: signupName || u.displayName || "Agente Sentinel",
-              fullName: signupName || u.displayName || "",
-              birthDate: signupBirth || "",
-              photoURL: u.photoURL || `https://ui-avatars.com/api/?name=${signupName || u.displayName || "Agente"}`,
-              isAdmin: isMasterAdmin,
-              isPremium: isMasterAdmin,
-              loginType: identifiedLoginType,
-              balance: isMasterAdmin ? 1000 : 10,
-              reputationScore: 100,
-              createdAt: Timestamp.now(),
-              transactions: []
-            };
-            try {
-              await setDoc(userRef, newProfile);
-              localStorage.removeItem("sentinel_signup_name");
-              localStorage.removeItem("sentinel_signup_birth");
-            } catch (e) {
-              handleFirestoreError(e, OperationType.WRITE, `${usersPath}/${u.uid}`);
-            }
-            profile = newProfile;
-          } else {
-            profile = userSnap.data() as UserProfile;
-            // Sync displayName if missing or generic
-            if (u.displayName && (profile.displayName === "Agente Sentinel" || !profile.displayName)) {
-               profile.displayName = u.displayName;
-               try {
-                 await updateDoc(userRef, { displayName: u.displayName });
-               } catch (e) {
-                 handleFirestoreError(e, OperationType.UPDATE, `${usersPath}/${u.uid}`);
-               }
-            }
-            // Sync loginType if missing
-            if (!profile.loginType) {
-               profile.loginType = identifiedLoginType;
-               try {
-                 await updateDoc(userRef, { loginType: identifiedLoginType });
-               } catch (e) {
-                 handleFirestoreError(e, OperationType.UPDATE, `${usersPath}/${u.uid}`);
-               }
-            }
-            // Ensure master admin always has privileges even if manually revoked in DB
-            if (isMasterAdmin && !profile.isAdmin) {
-              profile.isAdmin = true;
-              profile.isPremium = true;
-              try {
-                await updateDoc(userRef, { isAdmin: true, isPremium: true });
-              } catch (e) {
-                handleFirestoreError(e, OperationType.UPDATE, `${usersPath}/${u.uid}`);
-              }
-            }
-          }
-          setUser(profile);
-          fetchHistory(u.uid);
-        } else {
-          setUser(null);
-          fetchHistory();
-        }
-      } catch (err: any) {
-        console.error("Erro na sincronização de perfil:", err);
-        setError("Erro ao sincronizar seu perfil. Tente atualizar a página.");
-      }
-    });
-
     const savedCount = localStorage.getItem("sentinel_checks");
     if (savedCount) setCheckCount(parseInt(savedCount));
 
-    return () => unsubscribe();
+    fetchHistory();
+
+    const interval = setInterval(fetchViralTrends, 300000); // 5 min
+    return () => {
+      clearInterval(interval);
+    };
   }, []);
 
   // Theme Management
@@ -381,117 +217,30 @@ export default function App() {
     }
   }, [theme]);
 
-  // Admin Fetch
-  useEffect(() => {
-    if (view === "admin" && user?.isAdmin) {
-      fetchAdminUsers();
-    }
-  }, [view, user]);
-
-  const fetchAdminUsers = async () => {
+  const fetchViralTrends = async () => {
+    const path = "viral_trends";
     try {
-      const res = await axios.get("/api/admin/users", {
-        headers: { "x-admin-id": user?.uid }
-      });
-      setAdminUsers(res.data);
+      const q = query(collection(db, path), orderBy("updatedAt", "desc"), limit(5));
+      const snap = await getDocs(q);
+      if (snap.empty) {
+        setViralTrends([
+          { title: "Alimento X causa cura milagrosa", result: "Falso", viralityScore: 92 },
+          { title: "Novo imposto sobre herança aprovado", result: "Manipulado", viralityScore: 75 }
+        ]);
+      } else {
+        setViralTrends(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      }
     } catch (e) {
-      setError("Falha ao carregar usuários administrativos.");
+      console.error("Erro ao carregar tendências");
     }
   };
 
-  const updateAdminUser = async (uid: string, type: "balance" | "premium", value: any) => {
+  const fetchHistory = async () => {
     try {
-      const endpoint = type === "balance" ? "/api/admin/set-balance" : "/api/admin/set-premium";
-      const payload = type === "balance" ? { userId: uid, balance: value } : { userId: uid, isPremium: value };
-      
-      await axios.post(endpoint, payload, {
-        headers: { "x-admin-id": user?.uid }
-      });
-      fetchAdminUsers();
-    } catch (e) {
-      setError("Erro na operação administrativa.");
-    }
-  };
-
-  const fetchHistory = async (uid?: string) => {
-    try {
-      const response = await axios.get(`/api/historico${uid ? `?userId=${uid}` : ""}`);
+      const response = await axios.get(`/api/historico`);
       setHistory(response.data);
     } catch (err) {
       console.error("Histórico indisponível");
-    }
-  };
-
-  const handleLogin = () => {
-    setShowAuthModal(true);
-  };
-
-  const handleManualAuth = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAuthLoading(true);
-    setError(null);
-
-    try {
-      if (authMethod === "signup") {
-        if (password !== confirmPassword) {
-          throw new Error("As senhas não coincidem.");
-        }
-        if (!manualDisplayName || !birthDate) {
-          throw new Error("Preencha todos os campos obrigatórios.");
-        }
-        // Store transient signup data for profile creation in onAuthStateChanged
-        localStorage.setItem("sentinel_signup_name", manualDisplayName);
-        localStorage.setItem("sentinel_signup_birth", birthDate);
-
-        const credential = await createUserWithEmailAndPassword(auth, email, password);
-        await updateProfile(credential.user, { displayName: manualDisplayName });
-      } else {
-        await signInWithEmailAndPassword(auth, email, password);
-      }
-      setShowAuthModal(false);
-      resetAuthForm();
-    } catch (err: any) {
-      if (err.code === "auth/operation-not-allowed") {
-        setError("O login por e-mail/senha não está habilitado no Firebase Console. Por favor, habilite o provedor 'E-mail/senha' na aba Autenticação.");
-      } else if (err.code === 'auth/email-already-in-use') {
-        setError("Este e-mail já está em uso.");
-      } else if (err.code === 'auth/weak-password') {
-        setError("A senha deve ter pelo menos 6 caracteres.");
-      } else if (err.code === 'auth/invalid-email') {
-        setError("E-mail inválido.");
-      } else if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') {
-        setError("E-mail ou senha incorretos.");
-      } else {
-        setError(err.message || "Erro na autenticação manual.");
-      }
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  const resetAuthForm = () => {
-    setEmail("");
-    setPassword("");
-    setConfirmPassword("");
-    setManualDisplayName("");
-    setBirthDate("");
-  };
-
-  const handleGoogleLogin = async () => {
-    try {
-      await signInWithPopup(auth, googleProvider);
-      setShowAuthModal(false);
-    } catch (err) {
-      setError("Falha na autenticação Google.");
-    }
-  };
-
-  const handleLogout = async () => {
-    try {
-      await signOut(auth);
-      setUser(null);
-    } catch (err) {
-      console.error(err);
     }
   };
 
@@ -616,34 +365,30 @@ export default function App() {
         analysis.technicalDetails = `[ANALISANDO ARQUIVO DE VÍDEO] ${analysis.technicalDetails}`;
       }
 
-      const finalRecord: Verification = {
+      const finalRecord: any = {
         type: activeTab,
         content: urlInput || inputText || (activeTab === "video" ? `Vídeo: ${file?.name}` : "Arquivo de Mídia"),
         hash,
         ...analysis,
         reliabilityScore: Number(analysis.reliabilityScore) || 0,
-        userId: user?.uid || "anonymous",
+        userId: "anonymous",
         createdAt: serverTimestamp(),
         feedbackVotes: { up: 0, down: 0 }
       };
 
-      // Save & Update (Persistence only for authenticated users)
-      if (user) {
-        const path = "verifications";
-        console.log("SENTINEL DIAGNOSTIC: Attempting verification creation with:", JSON.stringify({
-          ...finalRecord,
-          createdAt: "SENTINEL_SERVER_TIMESTAMP"
-        }));
-        try {
-          await addDoc(collection(db, path), finalRecord);
-        } catch (e) {
-          handleFirestoreError(e, OperationType.CREATE, path);
-        }
+      try {
+        const docRef = await addDoc(collection(db, "verifications"), finalRecord);
+        setResult({ 
+          ...finalRecord, 
+          id: docRef.id,
+          createdAt: new Date().toISOString() 
+        });
+      } catch (e) {
+        console.error("Erro ao salvar verificação", e);
+        setResult({ ...finalRecord, createdAt: new Date().toISOString() });
       }
 
-      setResult({ ...finalRecord, createdAt: new Date().toISOString() });
-
-      fetchHistory(user?.uid);
+      fetchHistory();
     } catch (err: any) {
       setError(err.message || "Erro crítico no motor de análise.");
     } finally {
@@ -673,14 +418,8 @@ export default function App() {
             <History className="w-5 h-5" /> Histórico
           </div>
           <div onClick={() => setView("investigator")} className={`nav-item ${view === "investigator" ? "nav-item-active" : "nav-item-inactive dark:text-slate-400 dark:hover:bg-slate-800"}`}>
-            <ShieldAlert className="w-5 h-5" /> Investigador
+            <ShieldAlert className="w-5 h-5" /> Investigador Avançado
           </div>
-          
-          {user?.isAdmin && (
-            <div onClick={() => setView("admin")} className={`nav-item ${view === "admin" ? "nav-item-active" : "nav-item-inactive dark:text-slate-400 dark:hover:bg-slate-800"}`}>
-              <ShieldCheck className="w-5 h-5" /> Painel Admin
-            </div>
-          )}
 
           <div className="pt-8 mb-2">
             <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4 px-4">Recursos</p>
@@ -709,25 +448,6 @@ export default function App() {
                </button>
              ))}
           </div>
-
-          {user ? (
-            <div className="flex items-center gap-3 p-3 bg-slate-50 dark:bg-slate-800/50 rounded-2xl border border-slate-100 dark:border-slate-800">
-              <img src={user.photoURL} className="w-10 h-10 rounded-xl" />
-              <div className="flex-grow overflow-hidden">
-                <p className="text-xs font-bold truncate flex items-center gap-1">
-                  {user.displayName}
-                  {user.email === "andrewsantoss658@gmail.com" && <span className="text-[8px] text-rose-500 font-black uppercase">Master</span>}
-                </p>
-                <div className="flex items-center gap-1">
-                  <div className="w-2 h-2 rounded-full bg-emerald-500" />
-                  <p className="text-[10px] text-slate-500 font-medium">Online</p>
-                </div>
-              </div>
-              <button onClick={handleLogout} className="p-2 text-slate-400 hover:text-rose-500"><LogOut className="w-4 h-4" /></button>
-            </div>
-          ) : (
-            <button onClick={handleLogin} className="btn-primary w-full shadow-lg shadow-blue-500/10">Entrar p/ Salvar</button>
-          )}
         </div>
       </aside>
 
@@ -765,166 +485,6 @@ export default function App() {
         <div className="max-w-5xl mx-auto p-12 space-y-12">
           {view === "dashboard" && (
             <>
-              {!user && (
-                <section className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
-                  <div className="card-pro p-10 bg-gradient-to-br from-blue-700 via-blue-600 to-indigo-700 text-white border-none shadow-2xl overflow-hidden relative group h-full">
-                    <div className="absolute top-0 right-0 p-8 opacity-10 group-hover:scale-110 transition-transform">
-                      <ShieldCheck className="w-48 h-48" />
-                    </div>
-                    <div className="relative z-10 space-y-8">
-                      <div className="inline-flex items-center gap-2 px-3 py-1 bg-white/10 rounded-full text-[10px] font-black uppercase tracking-widest backdrop-blur-md">
-                        <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
-                        Acesso Agente Sentinel
-                      </div>
-                      <h2 className="text-4xl font-display font-black leading-tight">
-                        Proteja a Verdade. <br /> 
-                        <span className="text-blue-200">Crie sua conta agora.</span>
-                      </h2>
-                      <p className="text-blue-100/80 leading-relaxed font-medium">
-                        Tenha acesso a logs históricos, análise de deepfakes em vídeo e seu score de reputação de agente em tempo real.
-                      </p>
-                      
-                      <div className="space-y-4 pt-4">
-                         {[
-                           "Checks ilimitados p/ Premium",
-                           "Detecção Forense de Imagens",
-                           "Histórico de Integridade Global"
-                         ].map((item, i) => (
-                           <div key={i} className="flex items-center gap-3">
-                             <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                             <span className="text-sm font-medium text-blue-50">{item}</span>
-                           </div>
-                         ))}
-                      </div>
-
-                      <div className="pt-8">
-                         <div className="flex -space-x-4">
-                            {[1,2,3,4].map(i => (
-                              <img key={i} src={`https://i.pravatar.cc/100?u=${i}`} className="w-10 h-10 rounded-full border-4 border-blue-600" />
-                            ))}
-                            <div className="w-10 h-10 rounded-full bg-blue-500 border-4 border-blue-600 flex items-center justify-center text-[10px] font-bold">+9k</div>
-                         </div>
-                         <p className="text-[10px] text-blue-200 mt-3 font-bold uppercase tracking-widest">Agentes Ativos na Rede Sentinel</p>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="card-pro p-8 bg-white dark:bg-slate-900 shadow-xl space-y-6">
-                    <div className="flex bg-slate-100 dark:bg-slate-800 p-1.5 rounded-2xl w-full">
-                       <button 
-                         onClick={() => setAuthMethod('login')}
-                         className={`flex-1 py-3 text-xs font-black uppercase tracking-widest rounded-xl transition-all ${authMethod === 'login' ? 'bg-white dark:bg-slate-700 text-blue-600 shadow-sm' : 'text-slate-500'}`}
-                       >
-                         Entrar
-                       </button>
-                       <button 
-                         onClick={() => setAuthMethod('signup')}
-                         className={`flex-1 py-3 text-xs font-black uppercase tracking-widest rounded-xl transition-all ${authMethod === 'signup' ? 'bg-white dark:bg-slate-700 text-blue-600 shadow-sm' : 'text-slate-500'}`}
-                       >
-                         Criar Conta
-                       </button>
-                    </div>
-
-                    <div className="space-y-6">
-                      <button 
-                        onClick={handleGoogleLogin}
-                        className="w-full py-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl flex items-center justify-center gap-3 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all group"
-                      >
-                        <Globe className="w-5 h-5 text-slate-600 group-hover:text-blue-500" />
-                        <span className="text-sm font-bold text-slate-700 dark:text-slate-200">Prosseguir com Google</span>
-                      </button>
-
-                      <div className="relative">
-                        <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-100 dark:border-slate-800" /></div>
-                        <div className="relative flex justify-center text-[10px] uppercase font-black tracking-widest"><span className="bg-white dark:bg-slate-900 px-4 text-slate-400">ou preencher manualmente</span></div>
-                      </div>
-
-                      <form onSubmit={handleManualAuth} className="space-y-4">
-                        {authMethod === 'signup' && (
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                            <div className="relative">
-                              <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                              <input
-                                type="text"
-                                placeholder="Nome Completo"
-                                required
-                                value={manualDisplayName}
-                                onChange={(e) => setManualDisplayName(e.target.value)}
-                                className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
-                              />
-                            </div>
-                            <div className="relative">
-                              <History className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                              <input
-                                type="date"
-                                required
-                                value={birthDate}
-                                onChange={(e) => setBirthDate(e.target.value)}
-                                className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-[11px] font-bold outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
-                              />
-                            </div>
-                          </div>
-                        )}
-
-                        <div className="relative">
-                          <Globe className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                          <input
-                            type="email"
-                            placeholder="E-mail"
-                            required
-                            value={email}
-                            onChange={(e) => setEmail(e.target.value)}
-                            className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
-                          />
-                        </div>
-
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                          <div className="relative">
-                            <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                            <input
-                              type="password"
-                              placeholder="Senha"
-                              required
-                              value={password}
-                              onChange={(e) => setPassword(e.target.value)}
-                              className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
-                            />
-                          </div>
-                          {authMethod === 'signup' && (
-                            <div className="relative">
-                              <RefreshCcw className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                              <input
-                                type="password"
-                                placeholder="Confirmar Senha"
-                                required
-                                value={confirmPassword}
-                                onChange={(e) => setConfirmPassword(e.target.value)}
-                                className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
-                              />
-                            </div>
-                          )}
-                        </div>
-
-                        <button 
-                          type="submit"
-                          disabled={authLoading}
-                          className="btn-primary w-full shadow-xl shadow-blue-500/20 py-4 font-black uppercase tracking-widest disabled:opacity-50"
-                        >
-                          {authLoading ? <Loader2 className="w-5 h-5 animate-spin mx-auto" /> : authMethod === 'login' ? 'Autenticar Agente' : 'Registrar na Rede'}
-                        </button>
-                      </form>
-                      
-                      {error && (
-                        <div className="flex items-center gap-3 p-4 bg-rose-50 dark:bg-rose-900/20 border border-rose-100 dark:border-rose-800 rounded-2xl">
-                          <AlertTriangle className="w-4 h-4 text-rose-500" />
-                          <p className="text-[10px] font-bold text-rose-600 dark:text-rose-400 uppercase tracking-wider">{error}</p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </section>
-              )}
-
               {/* Verification Tools */}
               <section className="space-y-8">
                 <div className="flex flex-col gap-2">
@@ -1026,35 +586,26 @@ export default function App() {
                     {activeTab === "video" && (
                       <div 
                         onClick={() => {
-                          if (user?.isPremium || user?.isAdmin) {
-                            fileInputRef.current?.click();
-                          }
+                          fileInputRef.current?.click();
                         }}
-                        className={`w-full h-48 border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-2xl flex flex-col items-center justify-center bg-slate-50 dark:bg-slate-950 transition-all ${user?.isPremium || user?.isAdmin ? "hover:bg-slate-100 dark:hover:bg-slate-900 cursor-pointer group" : "opacity-60"}`}
+                        className="w-full h-48 border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-2xl flex flex-col items-center justify-center bg-slate-50 dark:bg-slate-950 transition-all hover:bg-slate-100 dark:hover:bg-slate-900 cursor-pointer group"
                       >
-                        {filePreview && (user?.isPremium || user?.isAdmin) ? (
+                        {filePreview ? (
                           <div className="flex flex-col items-center justify-center p-4">
                             <Video className="w-12 h-12 text-blue-500 mb-2" />
                             <p className="text-xs font-medium text-slate-600 dark:text-slate-300 truncate max-w-xs">{file?.name}</p>
                           </div>
-                        ) : (user?.isPremium || user?.isAdmin) ? (
+                        ) : (
                           <>
                             <Upload className="w-8 h-8 text-slate-300 group-hover:text-blue-500 mb-4" />
                             <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">Arraste o vídeo ou clique p/ carregar</p>
                             <p className="text-[10px] text-slate-400 uppercase tracking-widest mt-2 font-bold">Análise Biométrica e Padrões Neurais</p>
-                          </>
-                        ) : (
-                          <>
-                            <Lock className="w-8 h-8 text-slate-300 mb-4" />
-                            <p className="text-sm font-semibold text-slate-500 italic">Módulo de Vídeo Biométrico exclusivo para Planos Premium / Admin</p>
                           </>
                         )}
                         <input type="file" accept="video/*" ref={fileInputRef} onChange={(e) => {
                           if (e.target.files?.[0]) {
                             const f = e.target.files[0];
                             setFile(f);
-                            // For videos we don't display a full preview easily without a <video> tag, 
-                            // but we can at least show the filename.
                             setFilePreview("video-placeholder"); 
                           }
                         }} className="hidden" />
@@ -1159,26 +710,6 @@ export default function App() {
 
                         <div className="flex items-center justify-between">
                           <div className="flex gap-4">
-                            {user?.isAdmin && (
-                            <button 
-                              onClick={async () => {
-                                if (!result) return;
-                                try {
-                                  const { id, ...fakeData } = result;
-                                  await addDoc(collection(db, "known_fakes"), {
-                                    ...fakeData,
-                                    createdAt: serverTimestamp()
-                                  });
-                                  addNotification("Adicionado à Base Global de Fatos!", "success");
-                                } catch (e) {
-                                  handleFirestoreError(e, OperationType.CREATE, "known_fakes");
-                                }
-                              }}
-                              className="btn-secondary border-blue-200 text-blue-600 hover:bg-blue-50"
-                            >
-                              Promover à Base Global
-                            </button>
-                          )}
                           <button 
                             onClick={async () => {
                               if (!result?.id) return;
@@ -1312,201 +843,6 @@ export default function App() {
             </section>
           )}
 
-          {view === "admin" && user?.isAdmin && (
-             <section className="space-y-8">
-               <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-                 <div>
-                    <h2 className="font-display font-bold text-3xl dark:text-white">Gestão Extensiva</h2>
-                    <p className="text-slate-500 dark:text-slate-400">Controle de agentes e inteligência viral.</p>
-                 </div>
-                 <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-xl shrink-0">
-                    <button 
-                      onClick={() => setAdminSubView("users")}
-                      className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${adminSubView === "users" ? "bg-white dark:bg-slate-700 text-blue-600 shadow-sm" : "text-slate-400"}`}
-                    >
-                      Usuários
-                    </button>
-                    <button 
-                      onClick={() => setAdminSubView("trends")}
-                      className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${adminSubView === "trends" ? "bg-white dark:bg-slate-700 text-blue-600 shadow-sm" : "text-slate-400"}`}
-                    >
-                      Viralidade
-                    </button>
-                 </div>
-               </div>
-
-               {adminSubView === "users" ? (
-                 <div className="space-y-6">
-                   <div className="flex flex-wrap items-center justify-end gap-2">
-                       <div className="flex items-center gap-2 px-4 py-2 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
-                          <Search className="w-4 h-4 text-slate-400" />
-                          <input 
-                            type="text" 
-                            placeholder="Filtrar por nome/email..." 
-                            value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
-                            className="bg-transparent border-none text-xs outline-none w-48 dark:text-white" 
-                          />
-                       </div>
-                       <select 
-                         value={adminFilters.loginType}
-                         onChange={(e) => setAdminFilters({ ...adminFilters, loginType: e.target.value })}
-                         className="bg-slate-100 dark:bg-slate-800 border-none rounded-xl px-4 text-xs font-bold dark:text-slate-300"
-                       >
-                         <option value="all">Logins: Todos</option>
-                         <option value="google">Google</option>
-                         <option value="x">X (Twitter)</option>
-                         <option value="manual">Manual</option>
-                       </select>
-                       <select 
-                         value={adminFilters.premium}
-                         onChange={(e) => setAdminFilters({ ...adminFilters, premium: e.target.value })}
-                         className="bg-slate-100 dark:bg-slate-800 border-none rounded-xl px-4 text-xs font-bold dark:text-slate-300"
-                       >
-                         <option value="all">Planos: Todos</option>
-                         <option value="premium">Apenas Premium</option>
-                         <option value="free">Apenas Free</option>
-                       </select>
-                   </div>
-                   <div className="card-pro overflow-hidden border-none shadow-xl dark:bg-slate-900">
-                      <table className="w-full text-left border-collapse">
-                        <thead className="bg-slate-50 dark:bg-slate-800/50">
-                          <tr>
-                            <th className="px-6 py-4 text-[10px] font-black uppercase text-slate-400 tracking-widest">Identidade</th>
-                            <th className="px-6 py-4 text-[10px] font-black uppercase text-slate-400 tracking-widest">Saldo</th>
-                            <th className="px-6 py-4 text-[10px] font-black uppercase text-slate-400 tracking-widest">Plano</th>
-                            <th className="px-6 py-4 text-[10px] font-black uppercase text-slate-400 tracking-widest">Cadastro</th>
-                            <th className="px-6 py-4 text-[10px] font-black uppercase text-slate-400 tracking-widest text-right">Controles</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                          {adminUsers
-                            .filter(u => 
-                              (u.displayName?.toLowerCase().includes(searchTerm.toLowerCase()) || u.email?.toLowerCase().includes(searchTerm.toLowerCase())) &&
-                              (adminFilters.premium === "all" || (adminFilters.premium === "premium" ? u.isPremium : !u.isPremium)) &&
-                              (adminFilters.loginType === "all" || u.loginType === adminFilters.loginType)
-                            )
-                            .map(u => (
-                            <tr key={u.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-colors">
-                              <td className="px-6 py-6">
-                                <div className="flex items-center gap-3">
-                                  <img src={u.photoURL || `https://ui-avatars.com/api/?name=${u.displayName}`} className="w-9 h-9 rounded-lg" />
-                                  <div>
-                                    <p className="text-sm font-bold dark:text-white flex items-center gap-2">
-                                      {u.displayName}
-                                      <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-400 font-black uppercase">
-                                        {u.loginType || "google"}
-                                      </span>
-                                    </p>
-                                    <p className="text-[10px] text-slate-400 font-medium">{u.email}</p>
-                                  </div>
-                                </div>
-                              </td>
-                              <td className="px-6 py-6">
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-mono font-bold dark:text-slate-300">SC {u.balance || 0}</span>
-                                </div>
-                              </td>
-                              <td className="px-6 py-6">
-                                <span className={`status-badge ${u.isPremium ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-500'}`}>
-                                  {u.isPremium ? "Premium" : "Free Member"}
-                                </span>
-                              </td>
-                              <td className="px-6 py-6 text-[10px] font-mono text-slate-400 italic">
-                                {new Date(u.createdAt?.seconds * 1000 || u.createdAt).toLocaleDateString()}
-                              </td>
-                              <td className="px-6 py-6 text-right">
-                                <div className="flex items-center justify-end gap-2">
-                                  <button 
-                                    onClick={() => updateAdminUser(u.id, "balance", (u.balance || 0) + 10)}
-                                    className="p-2 text-slate-400 hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 rounded-lg transition-all"
-                                    title="+10 Credits"
-                                  >
-                                    <TrendingUp className="w-4 h-4" />
-                                  </button>
-                                  <button 
-                                    onClick={() => updateAdminUser(u.id, "balance", Math.max(0, (u.balance || 0) - 10))}
-                                    className="p-2 text-slate-400 hover:text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-900/20 rounded-lg transition-all"
-                                    title="-10 Credits"
-                                  >
-                                    <TrendingDown className="w-4 h-4" />
-                                  </button>
-                                  <div className="w-px h-4 bg-slate-200 dark:bg-slate-800 mx-1" />
-                                  <button 
-                                    onClick={() => updateAdminUser(u.id, "premium", !u.isPremium)}
-                                    className={`p-2 rounded-lg transition-all ${u.isPremium ? 'text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20' : 'text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20'}`}
-                                    title={u.isPremium ? "Downgrade" : "Make Premium"}
-                                  >
-                                    {u.isPremium ? <ShieldAlert className="w-4 h-4" /> : <ShieldCheck className="w-4 h-4" />}
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                   </div>
-                 </div>
-               ) : (
-                 <div className="space-y-6">
-                    <div className="card-pro p-8 dark:bg-slate-900 border-none">
-                      <h3 className="font-display font-bold text-xl mb-6 dark:text-white">Injetar Tendência Crítica</h3>
-                      <form onSubmit={async (e) => {
-                        e.preventDefault();
-                        const f = e.currentTarget;
-                        const title = (f.elements.namedItem("title") as HTMLInputElement).value;
-                        const resultVal = (f.elements.namedItem("result") as HTMLSelectElement).value;
-                        try {
-                          await addDoc(collection(db, "viral_trends"), {
-                            title,
-                            result: resultVal,
-                            viralityScore: 90,
-                            updatedAt: Timestamp.now()
-                          });
-                          f.reset();
-                          fetchViralTrends();
-                          alert("Tendência adicionada com sucesso!");
-                        } catch (err) {
-                          alert("Erro ao adicionar tendência");
-                        }
-                      }} className="flex flex-col md:flex-row gap-4">
-                        <input 
-                          name="title" 
-                          placeholder="Título da notícia viral/boato..." 
-                          className="flex-grow bg-slate-50 dark:bg-slate-800 border-none rounded-xl px-4 py-3 text-sm dark:text-white focus:ring-2 ring-blue-500 transition-all" 
-                          required 
-                        />
-                        <select 
-                          name="result" 
-                          className="bg-slate-50 dark:bg-slate-800 border-none rounded-xl px-4 py-3 text-sm dark:text-white outline-none"
-                        >
-                          <option value="Falso">Falso</option>
-                          <option value="Verdadeiro">Verdadeiro</option>
-                          <option value="Manipulado">Manipulado</option>
-                        </select>
-                        <button type="submit" className="btn-primary">Adicionar ao Monitor</button>
-                      </form>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      {viralTrends.map((t, i) => (
-                        <div key={i} className="card-pro p-6 dark:bg-slate-900 border-none flex justify-between items-center group animate-in fade-in slide-in-from-bottom-4 duration-500">
-                          <div>
-                             <p className="text-sm font-bold dark:text-white mb-1">{t.title}</p>
-                             <div className="flex gap-2">
-                               <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded ${t.result === 'Falso' ? 'bg-rose-500/20 text-rose-400' : 'bg-amber-500/20 text-amber-400'}`}>{t.result}</span>
-                               <span className="text-[10px] text-slate-500 font-mono italic">Prioridade Máxima</span>
-                             </div>
-                          </div>
-                          {/* Add delete button if needed */}
-                        </div>
-                      ))}
-                    </div>
-                 </div>
-               )}
-             </section>
-          )}
-
           {view === "terms" && (
             <section className="space-y-12 max-w-4xl">
                <div className="flex flex-col gap-2">
@@ -1576,12 +912,8 @@ export default function App() {
                  </div>
                  <div className="space-y-6">
                     <div className="card-pro p-6 dark:bg-slate-800/50 border-none">
-                       <h5 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">Autenticação</h5>
-                       <p className="text-[10px] text-slate-500">Utilize o cabeçalho Bearer Token com sua chave gerada em 'API Pública'.</p>
-                    </div>
-                    <div className="card-pro p-6 dark:bg-slate-800/50 border-none">
-                       <h5 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">Limites de Taxa</h5>
-                       <p className="text-[10px] text-slate-500">Free: 10 req/dia. Premium: 1.000 req/min.</p>
+                       <h5 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">Uso de API</h5>
+                       <p className="text-[10px] text-slate-500">Acesse nossa tecnologia programaticamente para integrações empresariais.</p>
                     </div>
                  </div>
               </div>
@@ -1624,224 +956,6 @@ export default function App() {
             </section>
           )}
 
-          {view === "profile" && (
-            <section className="space-y-12">
-               {/* Dashboard Header */}
-               <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 pb-8 border-b border-slate-100 dark:border-slate-800">
-                  <div className="space-y-4">
-                    <div className="flex items-center gap-4">
-                      <div className="relative">
-                        <img src={user?.photoURL} className="w-24 h-24 rounded-3xl object-cover shadow-2xl border-4 border-white dark:border-slate-800" />
-                        <div className="absolute -bottom-1 -right-1 w-8 h-8 bg-emerald-500 rounded-full border-4 border-white dark:border-slate-950 flex items-center justify-center">
-                          <ShieldCheck className="w-4 h-4 text-white" />
-                        </div>
-                      </div>
-                      <div>
-                        <h2 className="font-display font-bold text-3xl dark:text-white">{user?.displayName}</h2>
-                        <div className="flex items-center gap-2 mt-1">
-                          <span className="text-sm text-slate-500 font-medium">{user?.email}</span>
-                          <div className="w-1 h-1 rounded-full bg-slate-300" />
-                          <span className="text-xs font-bold text-blue-600 uppercase tracking-widest">{user?.isPremium ? 'Agente Veterano' : 'Agente Recruta'}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  
-                  <div className="flex gap-3">
-                    <button onClick={handleLogout} className="btn-secondary flex items-center gap-2"><LogOut className="w-4 h-4" /> Sair</button>
-                    <button onClick={() => setView("dashboard")} className="btn-primary flex items-center gap-2">Analisar Agora</button>
-                  </div>
-               </div>
-
-               {/* Stats Grid */}
-               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  <div className="card-pro p-8 relative overflow-hidden bg-gradient-to-br from-blue-600 to-blue-800 text-white border-none shadow-2xl shadow-blue-500/20">
-                    <Coins className="absolute -right-4 -bottom-4 w-32 h-32 text-white/10" />
-                    <div className="relative z-10 space-y-4">
-                      <p className="text-[10px] font-black uppercase tracking-widest text-blue-100">Carga Sentinel</p>
-                      <h4 className="text-5xl font-mono font-bold tracking-tighter">
-                        ∞
-                        <span className="text-lg ml-2 opacity-60">SC</span>
-                      </h4>
-                      <p className="text-[10px] font-medium text-blue-100/80">Acesso ilimitado à verificação avançada (Sentinel Engine).</p>
-                    </div>
-                  </div>
-
-                  <div className="card-pro p-8 bg-white dark:bg-slate-900 border-none flex flex-col justify-between">
-                    <div>
-                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Engajamento</p>
-                      <h4 className="text-4xl font-mono font-bold dark:text-white">
-                        {history.length}
-                        <span className="text-lg ml-2 text-slate-400 font-medium font-sans">Análises</span>
-                      </h4>
-                    </div>
-                    <div className="flex items-center gap-2 text-emerald-500 font-bold text-xs mt-4">
-                      <TrendingUp className="w-4 h-4" />
-                      <span>+12% esta semana</span>
-                    </div>
-                  </div>
-
-                  <div className="card-pro p-8 bg-emerald-50 dark:bg-emerald-950/30 border-emerald-100 dark:border-emerald-900/50 flex flex-col justify-between border-none">
-                    <div>
-                      <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600/60 dark:text-emerald-400/60 mb-2">Score de Reputação</p>
-                      <h4 className="text-4xl font-mono font-bold text-emerald-700 dark:text-emerald-400">
-                        {user?.reputationScore || 100}
-                        <span className="text-lg ml-2 opacity-60">/ 100</span>
-                      </h4>
-                    </div>
-                    <div className="flex items-center gap-2 text-emerald-600/60 text-xs mt-4">
-                       <Star className="w-4 h-4 fill-emerald-500 text-emerald-500" />
-                       <span>Nível de Agente Confiável</span>
-                    </div>
-                  </div>
-               </div>
-
-               {/* History and Actions */}
-               <div className="grid grid-cols-1 lg:grid-cols-5 gap-12">
-                  <div className="lg:col-span-3 space-y-8">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <Clock className="w-5 h-5 text-slate-400" />
-                        <h3 className="font-display font-bold text-xl dark:text-white">Histórico Recente</h3>
-                      </div>
-                      <button onClick={() => setView("history")} className="text-xs font-bold text-blue-600 hover:underline">Ver tudo</button>
-                    </div>
-
-                    <div className="space-y-4">
-                      {history.length === 0 ? (
-                        <div className="card-pro p-12 text-center border-dashed dark:bg-slate-900 border-none">
-                          <p className="text-slate-500 text-sm">Nenhuma verificação realizada ainda.</p>
-                        </div>
-                      ) : (
-                        history.slice(0, 5).map((item) => (
-                          <div key={item.id} className="flex items-center gap-4 p-4 hover:bg-slate-50 dark:hover:bg-slate-800/40 rounded-2xl transition-all group">
-                            <div className={`w-2 h-2 rounded-full ${item.reliabilityScore > 80 ? 'bg-emerald-500' : 'bg-rose-500'}`} />
-                            <div className="flex-grow min-w-0">
-                              <p className="text-sm font-bold dark:text-white truncate">{item.content}</p>
-                              <p className="text-[10px] text-slate-500 font-medium italic">{new Date(item.createdAt).toLocaleDateString()} &bull; {item.type}</p>
-                            </div>
-                            <div className="text-right shrink-0">
-                               <p className="text-xs font-black dark:text-slate-300">{item.result}</p>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-
-                    {/* Credit Transactions History */}
-                    <div className="pt-12 space-y-8">
-                       <div className="flex items-center gap-2">
-                        <Coins className="w-5 h-5 text-amber-500" />
-                        <h3 className="font-display font-bold text-xl dark:text-white">Fluxo de Créditos</h3>
-                      </div>
-                      <div className="card-pro p-6 dark:bg-slate-900 border-none space-y-4 max-h-[400px] overflow-y-auto custom-scrollbar">
-                        {(!user?.transactions || user.transactions.length === 0) ? (
-                          <p className="text-xs text-slate-500 text-center py-8">Nenhuma movimentação financeira registrada.</p>
-                        ) : (
-                          [...user.transactions].reverse().map((tx) => (
-                            <div key={tx.id} className="flex items-center justify-between p-3 border-b border-slate-50 dark:border-slate-800 last:border-none">
-                               <div className="flex items-center gap-3">
-                                  <div className={`p-2 rounded-lg ${tx.type === 'acquired' ? 'bg-emerald-50 text-emerald-600' : tx.type === 'consumed' ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-600'}`}>
-                                     {tx.type === 'acquired' ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-                                  </div>
-                                  <div>
-                                     <p className="text-xs font-bold dark:text-white">{tx.description}</p>
-                                     <p className="text-[10px] text-slate-400 font-medium">{new Date(tx.date.seconds ? tx.date.toDate() : tx.date).toLocaleString()}</p>
-                                  </div>
-                               </div>
-                               <div className="text-right">
-                                  <p className={`text-xs font-black ${tx.type === 'acquired' ? 'text-emerald-500' : 'text-slate-500'}`}>
-                                     {tx.type === 'acquired' ? '+' : '-'}{tx.amount}
-                                  </p>
-                                  <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest">{tx.type}</p>
-                               </div>
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="lg:col-span-2 space-y-8">
-                    <div className="flex items-center gap-2">
-                      <CreditCard className="w-5 h-5 text-slate-400" />
-                      <h3 className="font-display font-bold text-xl dark:text-white">Adquirir Créditos</h3>
-                    </div>
-
-                    <div className="space-y-4">
-                       {[
-                         { id: "10c", amount: 10, price: "Grátis", label: "Teste Inicial", limit: true },
-                         { id: "50c", amount: 50, price: "$9.90", label: "Agente Ativo", best: false },
-                         { id: "unlimited", amount: "∞", price: "$29.90", label: "Mestre da Verdade", best: true }
-                       ].map((pack) => (
-                         <div 
-                           key={pack.id} 
-                           onClick={async () => {
-                             if (!user) return;
-                             if (pack.amount === "∞") {
-                               addNotification("Upgrade para Premium solicitado. Redirecionando para checkout...", "info");
-                               // Simulation
-                               setTimeout(async () => {
-                                 await updateDoc(doc(db, "users", user.uid), { isPremium: true });
-                                 setUser({ ...user, isPremium: true });
-                                 addNotification("Parabéns! Você agora é um Mestre da Verdade.", "success");
-                               }, 2000);
-                             } else {
-                               const addon = typeof pack.amount === 'number' ? pack.amount : 0;
-                               const newTotal = (user.balance || 0) + addon;
-                               
-                               const transaction: Transaction = {
-                                 id: `tx_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-                                 date: Timestamp.now(),
-                                 amount: addon,
-                                 type: "acquired",
-                                 description: `Compra de Créditos: Pacote ${pack.label}`
-                               };
-
-                               await updateDoc(doc(db, "users", user.uid), { 
-                                 balance: newTotal,
-                                 transactions: arrayUnion(transaction)
-                               });
-
-                               setUser({ 
-                                 ...user, 
-                                 balance: newTotal,
-                                 transactions: user.transactions ? [...user.transactions, transaction] : [transaction]
-                               });
-                               addNotification(`${addon} créditos adicionados com sucesso!`, "success");
-                             }
-                           }}
-                           className={`relative p-6 rounded-[2rem] border-2 cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98] ${pack.best ? 'border-blue-500 bg-blue-50/30 dark:bg-blue-900/10' : 'border-slate-100 dark:border-slate-800'}`}
-                         >
-                           {pack.best && <span className="absolute -top-3 left-6 px-3 py-1 bg-blue-500 text-white text-[8px] font-black uppercase rounded-full shadow-lg shadow-blue-500/20">Melhor Oferta</span>}
-                           <div className="flex items-center justify-between">
-                             <div>
-                               <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">{pack.label}</p>
-                               <h5 className="text-xl font-bold dark:text-white">
-                                 {pack.amount} SC
-                                 <span className="text-sm ml-2 font-medium text-slate-500">por {pack.price}</span>
-                               </h5>
-                             </div>
-                             <div className="w-10 h-10 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center text-slate-400 group-hover:text-blue-500">
-                               <ChevronRight className="w-5 h-5" />
-                             </div>
-                           </div>
-                         </div>
-                       ))}
-                    </div>
-
-                    <div className="p-6 bg-slate-50 dark:bg-slate-800/30 rounded-3xl border border-slate-100 dark:border-slate-800">
-                       <div className="flex gap-4 items-start">
-                          <Bell className="w-5 h-5 text-blue-600 shrink-0" />
-                          <p className="text-[10px] text-slate-500 font-medium leading-relaxed">
-                            <strong>Aviso Sentinel:</strong> Créditos são consumidos apenas em análises de mídia complexa e textos longos com checagem cruzada profunda.
-                          </p>
-                       </div>
-                    </div>
-                  </div>
-               </div>
-            </section>
-          )}
 
           {view === "investigator" && (
              <section className="space-y-8">
@@ -1849,13 +963,12 @@ export default function App() {
                  <div className="w-20 h-20 bg-blue-50 dark:bg-blue-900/20 rounded-3xl flex items-center justify-center mx-auto mb-4">
                     <ShieldCheck className="w-10 h-10 text-blue-600" />
                  </div>
-                 <h2 className="font-display font-bold text-3xl dark:text-white">Modo Investigador Pro</h2>
-                 <p className="text-slate-500 dark:text-slate-400 text-lg">Acesso direto a cruzamento de dados forenses, análise de metadados profunda e detecção de padrões neurais de desinformação.</p>
+                 <h2 className="font-display font-bold text-3xl dark:text-white">Motor Investigador Ativo</h2>
+                 <p className="text-slate-500 dark:text-slate-400 text-lg">Seu acesso ao Sentinel permite cruzamento de dados forenses, análise de metadados profunda e detecção de padrões neurais de desinformação em tempo real.</p>
                  <div className="flex flex-col gap-4 items-center mt-8">
-                    <button className="btn-primary py-4 px-12 text-base shadow-xl shadow-blue-500/20">Upgrade para Individual ($19/m)</button>
                     <div className="flex gap-4">
-                      <button className="btn-secondary">Base de Conhecimento</button>
-                      <button className="btn-secondary">Protocolos Ativos</button>
+                      <button onClick={() => setView("dashboard")} className="btn-primary py-4 px-12">Nova Análise</button>
+                      <button className="btn-secondary">Protocolos de Segurança</button>
                     </div>
                  </div>
                </div>
@@ -1875,7 +988,7 @@ export default function App() {
                   <div className="space-y-3">
                     {[
                       { q: "Como o Sentinel garante 100% de precisão?", a: "Nós utilizamos uma análise multi-camada: IA, verificação de fontes externas e hashing SHA-256 para garantir integridade factual crítica." },
-                      { q: "O serviço é gratuito para sempre?", a: "Oferecemos uma carga gratuita diária. Usuários Premium desbloqueiam verificações ilimitadas e análise de vídeos/deepfakes." },
+                      { q: "O serviço é gratuito para sempre?", a: "Sim, oferecemos acesso total e ilimitado para todas as ferramentas de verificação." },
                       { q: "Como integrar a API do Sentinel em meu site?", a: "Você pode gerar uma chave API na aba 'API Pública'. Oferecemos SDKs para Node.js, Python e Go." },
                       { q: "O Sentinel analisa imagens privadas?", a: "A privacidade é nossa prioridade. Suas imagens são processadas em ambiente isolado e não são usadas para treinamento de IA pública." }
                     ].map((faq, i) => (
@@ -2024,16 +1137,6 @@ export default function App() {
         <button onClick={() => setView("dashboard")} className={`p-2 rounded-xl ${view === 'dashboard' ? 'text-blue-600' : 'text-slate-400 dark:text-slate-500'}`}><LayoutGrid className="w-6 h-6" /></button>
         <button onClick={() => setView("history")} className={`p-2 rounded-xl ${view === 'history' ? 'text-blue-600' : 'text-slate-400 dark:text-slate-500'}`}><History className="w-6 h-6" /></button>
         <button onClick={() => setView("investigator")} className={`p-2 rounded-xl ${view === 'investigator' ? 'text-blue-600' : 'text-slate-400 dark:text-slate-500'}`}><ShieldAlert className="w-6 h-6" /></button>
-        <button 
-          onClick={user ? () => setView("profile") : handleLogin} 
-          className={`p-2 rounded-xl ${view === 'profile' ? 'text-blue-600' : 'text-slate-400 dark:text-slate-500'}`}
-        >
-          {user ? (
-            <img src={user.photoURL} className="w-6 h-6 rounded-lg border-2 border-slate-100 dark:border-slate-800" />
-          ) : (
-            <UserIcon className="w-6 h-6" />
-          )}
-        </button>
       </div>
       <AnimatePresence>
         {notifications.map((n) => (
@@ -2056,149 +1159,6 @@ export default function App() {
             <p className="text-sm font-bold leading-tight">{n.message}</p>
           </motion.div>
         ))}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {showAuthModal && (
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[200] flex items-center justify-center p-4"
-          >
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="absolute inset-0 bg-slate-950/60 backdrop-blur-sm"
-              onClick={() => setShowAuthModal(false)}
-            />
-            
-            <motion.div 
-              initial={{ scale: 0.95, opacity: 0, y: 20 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.95, opacity: 0, y: 20 }}
-              className="relative w-full max-w-md bg-white dark:bg-slate-900 rounded-[2.5rem] shadow-2xl overflow-hidden border border-slate-100 dark:border-slate-800"
-            >
-              <div className="p-8 md:p-12 space-y-8">
-                <div className="text-center space-y-2">
-                  <div className="mb-4">
-                    <SiteLogo className="w-20 h-20 mx-auto" />
-                  </div>
-                  <h3 className="text-2xl font-display font-bold dark:text-white">
-                    {authMethod === 'login' ? 'Bem-vindo de volta' : 'Faça parte do Sentinel'}
-                  </h3>
-                  <p className="text-slate-500 text-sm">
-                    {authMethod === 'login' ? 'Acesse sua conta para gerenciar verificações.' : 'Crie sua conta para salvar seu histórico e reputação.'}
-                  </p>
-                </div>
-
-                <form onSubmit={handleManualAuth} className="space-y-4">
-                  {authMethod === 'signup' && (
-                    <>
-                      <div className="relative">
-                        <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                        <input
-                          type="text"
-                          placeholder="Seu Nome Completo"
-                          required
-                          value={manualDisplayName}
-                          onChange={(e) => setManualDisplayName(e.target.value)}
-                          className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
-                        />
-                      </div>
-                      <div className="relative">
-                        <Clock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                        <input
-                          type="date"
-                          placeholder="Data de Nascimento"
-                          required
-                          value={birthDate}
-                          onChange={(e) => setBirthDate(e.target.value)}
-                          className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
-                        />
-                      </div>
-                    </>
-                  )}
-
-                  <div className="relative">
-                    <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                    <input
-                      type="email"
-                      placeholder="seu@email.com"
-                      required
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
-                    />
-                  </div>
-
-                  <div className="relative">
-                    <Key className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                    <input
-                      type="password"
-                      placeholder="Sua senha secreta"
-                      required
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
-                    />
-                  </div>
-
-                  {authMethod === 'signup' && (
-                    <div className="relative">
-                      <Key className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                      <input
-                        type="password"
-                        placeholder="Repita sua senha"
-                        required
-                        value={confirmPassword}
-                        onChange={(e) => setConfirmPassword(e.target.value)}
-                        className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
-                      />
-                    </div>
-                  )}
-
-                  <button 
-                    type="submit"
-                    disabled={authLoading}
-                    className="btn-primary w-full py-4 rounded-2xl shadow-lg shadow-blue-500/20 flex items-center justify-center gap-2"
-                  >
-                    {authLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : (authMethod === 'login' ? 'Entrar Agora' : 'Criar Conta')}
-                  </button>
-                </form>
-
-                <div className="relative h-px bg-slate-100 dark:bg-slate-800 my-4">
-                  <span className="absolute left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white dark:bg-slate-900 px-4 text-[10px] font-black tracking-widest text-slate-400 uppercase">Ou continue com</span>
-                </div>
-
-                <div className="grid grid-cols-1 gap-4">
-                  <button 
-                    onClick={handleGoogleLogin}
-                    className="flex items-center justify-center gap-3 w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 py-3 rounded-2xl text-sm font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-all"
-                  >
-                    <svg className="w-5 h-5" viewBox="0 0 24 24">
-                      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/>
-                      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-                    </svg>
-                    Google
-                  </button>
-                </div>
-
-                <div className="text-center">
-                  <button 
-                    onClick={() => { setAuthMethod(authMethod === 'login' ? 'signup' : 'login'); resetAuthForm(); }}
-                    className="text-xs font-bold text-slate-500 dark:text-slate-400 hover:text-blue-600 transition-colors"
-                  >
-                    {authMethod === 'login' ? 'Não tem conta? Cadastre-se' : 'Já possui conta? Faça login'}
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
       </AnimatePresence>
     </div>
   );
