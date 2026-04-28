@@ -175,6 +175,7 @@ interface UserProfile {
 export default function App() {
   const [view, setView] = useState<ViewMode>("dashboard");
   const [activeTab, setActiveTab] = useState<VerificationType>("text");
+  const [imageAnalysisMode, setImageAnalysisMode] = useState<"visual" | "ocr">("visual");
   const [theme, setTheme] = useState<Theme>((localStorage.getItem("sentinel_theme") as Theme) || "system");
   
   // Admin Data
@@ -495,11 +496,6 @@ export default function App() {
   };
 
   const verify = async () => {
-    if (!user && checkCount >= 5) {
-      setError("Limite de 5 perguntas para convidados atingido. Crie uma conta gratuita para continuar verificando sem limites!");
-      return;
-    }
-
     setLoading(true);
     setError(null);
     setResult(null);
@@ -526,12 +522,8 @@ export default function App() {
         contentToHash = file.name + file.size; // Simple hash for video
       }
 
-      // Check Credits
-      if (user && !user.isAdmin && !user.isPremium) {
-        if ((user.balance || 0) <= 0) {
-          throw new Error("Saldo insuficiente. Adquira mais créditos em seu perfil.");
-        }
-      }
+      // Credits requirement removed for unlimited access
+
 
       // Layer 1: Cache Check
       const cacheRes = await axios.post("/api/check-cache", { content: contentToHash });
@@ -546,7 +538,8 @@ export default function App() {
 
       // Layer 3: AI Intensive Analysis
       const hash = CryptoJS.SHA256(contentToHash).toString();
-      const prompt = `Você é um perito em verificação de fatos (Sentinel Engine).
+      
+      let prompt = `Você é um perito em verificação de fatos (Sentinel Engine).
       Analise o conteúdo abaixo com base em:
       1. Veracidade dos fatos.
       2. Reputação da fonte (se link: ${metadata.domain || "N/A"}).
@@ -565,10 +558,35 @@ export default function App() {
         "references": [
           { "title": "Título da Matéria", "url": "URL da Fonte", "type": "original | factcheck | context" }
         ]
+      }`;
+
+      if (activeTab === "image" && imageAnalysisMode === "ocr") {
+        prompt = `Você é um perito em verificação de fatos (Sentinel Engine).
+        Sua tarefa principal é realizar OCR (Reconhecimento Óptico de Caracteres) na imagem enviada para extrair todo o texto visível.
+        Após extrair o texto, realize uma análise profunda de fact-checking sobre o conteúdo textual extraído.
+        
+        Siga estes critérios:
+        1. Extraia o texto com precisão.
+        2. Verifique a veracidade das afirmações contidas no texto.
+        3. Identifique se o texto ou a imagem apresentam sinais de manipulação digital.
+        4. Avalie o contexto e a intenção do conteúdo.
+
+        Retorne rigorosamente um JSON:
+        {
+          "result": "Verdadeiro | Falso | Manipulado | IA",
+          "explanation": "Resumo do texto extraído e veredito final",
+          "technicalDetails": "Texto extraído na íntegra: [Insira o texto aqui]. Análise técnica detalhando as fontes consultadas e evidências de vericidade.",
+          "reliabilityScore": 0-100,
+          "riskLevel": "Baixo | Médio | Alto",
+          "sourceRating": "Confiável | Duvidosa | Desconhecida",
+          "sources": ["links obrigatórios"],
+          "references": [
+            { "title": "Título", "url": "URL", "type": "original | factcheck | context" }
+          ]
+        }`;
       }
 
-      Conteúdo: ${inputText || urlInput || "Análise de Imagem/Mídia"}
-      Metadata: ${JSON.stringify(metadata)}`;
+      prompt += `\n\nConteúdo: ${inputText || urlInput || "Análise de Imagem/Mídia"}\nMetadata: ${JSON.stringify(metadata)}`;
 
       let aiResponse;
       if (activeTab === "image" && filePreview) {
@@ -624,39 +642,6 @@ export default function App() {
       }
 
       setResult({ ...finalRecord, createdAt: new Date().toISOString() });
-
-      if (!user) {
-        const nc = checkCount + 1;
-        setCheckCount(nc);
-        localStorage.setItem("sentinel_checks", nc.toString());
-      } else if (!user.isAdmin && !user.isPremium) {
-        // Deduct 1 credit
-        const newBalance = Math.max(0, (user.balance || 0) - 1);
-        const transaction: Transaction = {
-          id: `tx_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-          date: Timestamp.now(),
-          amount: 1,
-          type: "consumed",
-          description: `Análise Sentinel: ${activeTab}`
-        };
-
-        const userRef = doc(db, "users", user.uid);
-        try {
-          await updateDoc(userRef, { 
-            balance: newBalance,
-            transactions: arrayUnion(transaction)
-          });
-        } catch (e) {
-          handleFirestoreError(e, OperationType.UPDATE, `users/${user.uid}`);
-        }
-
-        setUser({ 
-          ...user, 
-          balance: newBalance,
-          transactions: user.transactions ? [...user.transactions, transaction] : [transaction]
-        });
-        addNotification("1 crédito Sentinel utilizado.", "info");
-      }
 
       fetchHistory(user?.uid);
     } catch (err: any) {
@@ -994,28 +979,47 @@ export default function App() {
                     )}
 
                     {activeTab === "image" && (
-                      <div 
-                        onClick={() => fileInputRef.current?.click()}
-                        className="w-full h-48 border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-2xl flex flex-col items-center justify-center bg-slate-50 dark:bg-slate-950 hover:bg-slate-100 dark:hover:bg-slate-900 transition-all cursor-pointer group"
-                      >
-                        {filePreview ? (
-                          <img src={filePreview} className="h-full w-full object-contain p-4 rounded-2xl" />
-                        ) : (
-                          <>
-                            <Upload className="w-8 h-8 text-slate-300 group-hover:text-blue-500 mb-4" />
-                            <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">Arraste a imagem ou clique p/ carregar</p>
-                            <p className="text-[10px] text-slate-400 uppercase tracking-widest mt-2 font-bold">Detecção EXIF e Inconsistências</p>
-                          </>
-                        )}
-                        <input type="file" ref={fileInputRef} onChange={(e) => {
-                          if (e.target.files?.[0]) {
-                            const f = e.target.files[0];
-                            setFile(f);
-                            const reader = new FileReader();
-                            reader.onload = (re) => setFilePreview(re.target?.result as string);
-                            reader.readAsDataURL(f);
-                          }
-                        }} className="hidden" />
+                      <div className="space-y-4">
+                        <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-xl w-fit">
+                          <button 
+                            onClick={() => setImageAnalysisMode("visual")}
+                            className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${imageAnalysisMode === "visual" ? "bg-white dark:bg-slate-700 text-blue-600 shadow-sm" : "text-slate-400"}`}
+                          >
+                            Análise Visual
+                          </button>
+                          <button 
+                            onClick={() => setImageAnalysisMode("ocr")}
+                            className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${imageAnalysisMode === "ocr" ? "bg-white dark:bg-slate-700 text-blue-600 shadow-sm" : "text-slate-400"}`}
+                          >
+                            Captura de Tela
+                          </button>
+                        </div>
+
+                        <div 
+                          onClick={() => fileInputRef.current?.click()}
+                          className="w-full h-48 border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-2xl flex flex-col items-center justify-center bg-slate-50 dark:bg-slate-950 hover:bg-slate-100 dark:hover:bg-slate-900 transition-all cursor-pointer group"
+                        >
+                          {filePreview ? (
+                            <img src={filePreview} className="h-full w-full object-contain p-4 rounded-2xl" />
+                          ) : (
+                            <>
+                              <Upload className="w-8 h-8 text-slate-300 group-hover:text-blue-500 mb-4" />
+                              <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">Arraste a imagem ou clique p/ carregar</p>
+                              <p className="text-[10px] text-slate-400 uppercase tracking-widest mt-2 font-bold">
+                                {imageAnalysisMode === "ocr" ? "Detecção de Texto e Fact-Checking" : "Detecção EXIF e Inconsistências"}
+                              </p>
+                            </>
+                          )}
+                          <input type="file" ref={fileInputRef} onChange={(e) => {
+                            if (e.target.files?.[0]) {
+                              const f = e.target.files[0];
+                              setFile(f);
+                              const reader = new FileReader();
+                              reader.onload = (re) => setFilePreview(re.target?.result as string);
+                              reader.readAsDataURL(f);
+                            }
+                          }} className="hidden" />
+                        </div>
                       </div>
                     )}
 
@@ -1068,15 +1072,6 @@ export default function App() {
                         </button>
                         <button onClick={() => { setInputText(""); setUrlInput(""); setFile(null); setFilePreview(null); setResult(null); setError(null); }} className="btn-secondary">Limpar</button>
                       </div>
-                      
-                      {!user && (
-                        <div className="text-right">
-                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Carga Gratuita</p>
-                          <div className="w-32 h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                            <div className="h-full bg-blue-600 transition-all" style={{ width: `${(checkCount / 1) * 100}%` }} />
-                          </div>
-                        </div>
-                      )}
                     </div>
                   </div>
                 </div>
@@ -1663,12 +1658,12 @@ export default function App() {
                   <div className="card-pro p-8 relative overflow-hidden bg-gradient-to-br from-blue-600 to-blue-800 text-white border-none shadow-2xl shadow-blue-500/20">
                     <Coins className="absolute -right-4 -bottom-4 w-32 h-32 text-white/10" />
                     <div className="relative z-10 space-y-4">
-                      <p className="text-[10px] font-black uppercase tracking-widest text-blue-100">Saldo Sentinel</p>
+                      <p className="text-[10px] font-black uppercase tracking-widest text-blue-100">Carga Sentinel</p>
                       <h4 className="text-5xl font-mono font-bold tracking-tighter">
-                        {user?.isAdmin || user?.isPremium ? '∞' : (user?.balance || 0)}
+                        ∞
                         <span className="text-lg ml-2 opacity-60">SC</span>
                       </h4>
-                      <p className="text-[10px] font-medium text-blue-100/80">Créditos disponíveis para verificação avançada.</p>
+                      <p className="text-[10px] font-medium text-blue-100/80">Acesso ilimitado à verificação avançada (Sentinel Engine).</p>
                     </div>
                   </div>
 
