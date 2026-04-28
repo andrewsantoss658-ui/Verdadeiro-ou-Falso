@@ -4,7 +4,10 @@ import { motion, AnimatePresence } from "motion/react";
 import { GoogleGenAI } from "@google/genai";
 import { initializeApp } from "firebase/app";
 import { 
-  getAuth
+  getAuth,
+  onAuthStateChanged,
+  signInAnonymously,
+  User
 } from "firebase/auth";
 import { 
   getFirestore, 
@@ -140,6 +143,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<VerificationType>("text");
   const [imageAnalysisMode, setImageAnalysisMode] = useState<"visual" | "ocr">("visual");
   const [theme, setTheme] = useState<Theme>((localStorage.getItem("sentinel_theme") as Theme) || "system");
+  const [user, setUser] = useState<User | null>(null);
   
   // Inputs
   const [inputText, setInputText] = useState("");
@@ -168,12 +172,32 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    const auth = getAuth();
+    
+    // Attempt anonymous sign-in
+    signInAnonymously(auth).catch(err => {
+      console.warn("Anonymous login skipped/restricted:", err.message);
+    });
+
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+    });
+
     const testConnection = async () => {
+      const path = 'test/connection';
       try {
         await getDocFromServer(doc(db, 'test', 'connection'));
-      } catch (error) {
+        // Test backend API health
+        const health = await axios.get('/api/health');
+        console.log("Backend Health:", health.data);
+      } catch (error: any) {
+        console.warn("Firestore connection check failed:", error.message);
         if(error instanceof Error && error.message.includes('the client is offline')) {
-          console.error("Please check your Firebase configuration or network status.");
+          setError("Você parece estar offline. Verifique sua conexão.");
+        } else {
+          // Don't block the UI with a full error for just the connection doc missing
+          // but log it for diagnostics
+          console.error("Connection Diagnostic:", error);
         }
       }
     };
@@ -188,6 +212,7 @@ export default function App() {
     const interval = setInterval(fetchViralTrends, 300000); // 5 min
     return () => {
       clearInterval(interval);
+      unsubscribe();
     };
   }, []);
 
@@ -237,10 +262,10 @@ export default function App() {
 
   const fetchHistory = async () => {
     try {
-      const response = await axios.get(`/api/historico`);
+      const response = await axios.get(`/api/history`);
       setHistory(response.data);
-    } catch (err) {
-      console.error("Histórico indisponível");
+    } catch (err: any) {
+      console.error("Histórico indisponível:", err?.message);
     }
   };
 
@@ -371,7 +396,7 @@ export default function App() {
         hash,
         ...analysis,
         reliabilityScore: Number(analysis.reliabilityScore) || 0,
-        userId: "anonymous",
+        userId: user?.uid || "anonymous",
         createdAt: serverTimestamp(),
         feedbackVotes: { up: 0, down: 0 }
       };
@@ -384,8 +409,7 @@ export default function App() {
           createdAt: new Date().toISOString() 
         });
       } catch (e) {
-        console.error("Erro ao salvar verificação", e);
-        setResult({ ...finalRecord, createdAt: new Date().toISOString() });
+        handleFirestoreError(e, OperationType.WRITE, "verifications");
       }
 
       fetchHistory();

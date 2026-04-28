@@ -24,24 +24,45 @@ const firebaseConfig = JSON.parse(
   fs.readFileSync(path.join(process.cwd(), "firebase-applet-config.json"), "utf8")
 );
 
-import * as cheerio from "cheerio";
+import { load } from "cheerio";
 import axios from "axios";
 import CryptoJS from "crypto-js";
 
-// Initialize Firebase (Standard Client SDK for environment compatibility)
-const firebaseApp = initializeApp(firebaseConfig);
-const db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
-
 async function startServer() {
+  console.log("Starting Sentinel Server...");
+  
+  let firebaseApp;
+  let db: any;
+  try {
+    firebaseApp = initializeApp(firebaseConfig);
+    db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
+    console.log("Firebase initialized successfully on server");
+  } catch (e) {
+    console.error("Firebase initialization failed:", e);
+  }
+
   const app = express();
   const PORT = 3000;
 
   app.use(cors());
   app.use(express.json({ limit: "50mb" }));
 
+  // Global logger
+  app.use((req, res, next) => {
+    console.log(`[SERVER] ${new Date().toISOString()} ${req.method} ${req.url}`);
+    next();
+  });
+
+  app.all("/api/*", (req, res, next) => {
+    if (!db) {
+      return res.status(503).json({ error: "Firebase Service Unavailable on Server" });
+    }
+    next();
+  });
+
   // API Routes
   app.get("/api/health", (req, res) => {
-    res.json({ status: "Sentinel Engine Operational 🛡️" });
+    res.json({ status: "Sentinel Engine Operational 🛡️", timestamp: new Date().toISOString() });
   });
 
   app.post("/api/check-cache", async (req, res) => {
@@ -85,7 +106,7 @@ async function startServer() {
         timeout: 8000
       });
 
-      const $ = cheerio.load(response.data);
+      const $ = load(response.data);
       const title = $("title").text() || $("h1").first().text();
       const description = $('meta[name="description"]').attr("content") || $('meta[property="og:description"]').attr("content") || "";
       
@@ -174,13 +195,15 @@ async function startServer() {
     }
   });
 
-  app.get("/api/historico", async (req, res) => {
+  app.get("/api/history", async (req, res) => {
     try {
-      const { userId } = req.query;
+      const userId = req.query.userId;
       let q;
       
+      console.log("Fetching history for user:", userId);
+      
       if (userId && userId !== "anonymous") {
-        q = query(collection(db, "verifications"), where("userId", "==", userId), orderBy("createdAt", "desc"), limit(30));
+        q = query(collection(db, "verifications"), where("userId", "==", userId as string), orderBy("createdAt", "desc"), limit(30));
       } else {
         q = query(collection(db, "verifications"), orderBy("createdAt", "desc"), limit(15));
       }
@@ -199,6 +222,17 @@ async function startServer() {
       console.error("History API Error:", error);
       res.status(500).json({ error: "Falha ao recuperar histórico." });
     }
+  });
+
+  // Alias for backward compatibility
+  app.get("/api/historico", (req, res) => {
+    res.redirect(301, `/api/history?${new URLSearchParams(req.query as any).toString()}`);
+  });
+
+  // Catch-all for API routes to avoid proxy 404 confusion
+  app.all("/api/*", (req, res) => {
+    console.warn(`Unmatched API call: ${req.method} ${req.url}`);
+    res.status(404).json({ error: "API Route Not Found", path: req.url });
   });
 
   const distPath = path.join(process.cwd(), "dist");

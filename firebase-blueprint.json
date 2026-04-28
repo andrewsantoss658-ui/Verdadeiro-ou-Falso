@@ -1,92 +1,81 @@
 {
   "entities": {
-    "trend": {
+    "User": {
+      "title": "Usuário do Sentinel",
+      "description": "Dados do usuário e saldo de créditos",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "isAdmin": { "type": "boolean" },
+        "isPremium": { "type": "boolean" },
+        "balance": { "type": "number" },
+        "reputationScore": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "loginType": { "type": "string" },
+        "fullName": { "type": "string" },
+        "birthDate": { "type": "string" },
+        "transactions": { "type": "array" }
+      },
+      "required": ["uid", "email", "isAdmin", "balance"]
+    },
+    "Verification": {
+      "title": "Análise de Vericidade",
+      "description": "Registro de uma checagem realizada pelo sistema",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "type": { "type": "string", "enum": ["text", "image", "video", "link"] },
+        "content": { "type": "string" },
+        "hash": { "type": "string" },
+        "result": { "type": "string" },
+        "explanation": { "type": "string" },
+        "technicalDetails": { "type": "string" },
+        "reliabilityScore": { "type": "number" },
+        "riskLevel": { "type": "string", "enum": ["Baixo", "Médio", "Alto"] },
+        "sourceRating": { "type": "string", "enum": ["Confiável", "Duvidosa", "Desconhecida"] },
+        "sources": { "type": "array" },
+        "references": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "feedbackVotes": { "type": "object" }
+      },
+      "required": ["userId", "type", "content", "createdAt"]
+    },
+    "ViralTrend": {
       "title": "Tendência Viral",
-      "description": "Item monitorado em tempo real por alta viralidade.",
+      "description": "Notícias que estão viralizando e precisam de atenção",
       "type": "object",
       "properties": {
         "title": { "type": "string" },
         "result": { "type": "string" },
-        "viralityScore": { "type": "integer" },
+        "viralityScore": { "type": "number" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["title", "result"]
-    },
-    "user": {
-      "title": "Usuário",
-      "description": "Perfil do usuário com sistema de reputação e limites.",
-      "type": "object",
-      "properties": {
-        "email": { "type": "string" },
-        "uid": { "type": "string" },
-        "displayName": { "type": "string" },
-        "fullName": { "type": "string" },
-        "birthDate": { "type": "string" },
-        "photoURL": { "type": "string" },
-        "isAdmin": { "type": "boolean" },
-        "isPremium": { "type": "boolean" },
-        "balance": { "type": "number", "description": "Saldo em créditos do usuário." },
-        "reputationScore": { "type": "number" },
-        "loginType": { "type": "string", "enum": ["google", "x", "manual"] },
-        "transactions": { 
-          "type": "array", 
-          "items": { 
-            "type": "object",
-            "properties": {
-              "id": { "type": "string" },
-              "date": { "type": "string" },
-              "amount": { "type": "number" },
-              "type": { "type": "string" },
-              "description": { "type": "string" }
-            }
-          } 
-        },
-        "createdAt": { "type": "string", "format": "date-time" }
-      },
-      "required": ["email", "isAdmin", "isPremium", "uid"]
-    },
-    "verification": {
-      "title": "Verificação",
-      "description": "Análise multi-camada de um conteúdo.",
-      "type": "object",
-      "properties": {
-        "type": { "type": "string", "enum": ["text", "image", "video", "link"] },
-        "hash": { "type": "string", "description": "Hash do conteúdo para cache." },
-        "content": { "type": "string" },
-        "reliabilityScore": { "type": "number", "description": "0-100" },
-        "riskLevel": { "type": "string", "enum": ["Baixo", "Médio", "Alto"] },
-        "sourceRating": { "type": "string", "enum": ["Confiável", "Duvidosa", "Desconhecida"] },
-        "result": { "type": "string" },
-        "explanation": { "type": "string" },
-        "technicalDetails": { "type": "string" },
-        "sources": { "type": "array", "items": { "type": "string" } },
-        "userId": { "type": "string" },
-        "feedback": { "type": "array", "items": { "type": "object" } },
-        "createdAt": { "type": "string", "format": "date-time" }
-      },
-      "required": ["type", "reliabilityScore", "riskLevel", "createdAt"]
+      "required": ["title", "viralityScore"]
     }
   },
   "firestore": {
+    "/test/connection": {
+      "schema": "object",
+      "description": "Documento para teste de conectividade"
+    },
     "/users/{userId}": {
-      "schema": "user",
-      "description": "Perfis de usuários."
+      "schema": "User",
+      "description": "Perfis de usuários"
     },
-    "/verifications": {
-      "schema": "verification",
-      "description": "Logs de verificação e cache."
+    "/verifications/{verifyId}": {
+      "schema": "Verification",
+      "description": "Histórico de checagens"
     },
-    "/metadata_reports": {
-      "schema": "verification",
-      "description": "Relatórios de metadados extraídos."
+    "/viral_trends/{trendId}": {
+      "schema": "ViralTrend",
+      "description": "Monitoramento de tendências"
     },
-    "/known_fakes": {
-      "schema": "verification",
-      "description": "Base global de boatos já desmentidos e padrões conhecidos."
-    },
-    "/viral_trends": {
-      "schema": "trend",
-      "description": "Monitoramento de tendências virais críticas."
+    "/known_fakes/{fakeId}": {
+      "schema": "Verification",
+      "description": "Base de dados interna de fakes conhecidos"
     }
   }
 }
