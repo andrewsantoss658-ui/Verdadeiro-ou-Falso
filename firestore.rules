@@ -1,80 +1,115 @@
 rules_version = '2';
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Default deny
+    
+    // 0. Global Safety Net - Deny all by default
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Helper functions
+    // --- Primitives & Helpers ---
+    
     function isSignedIn() {
       return request.auth != null;
     }
 
-    function isEmailVerified() {
-      // Relaxing this to just isSignedIn() for now because some development environment tokens
-      // might not pass the email_verified flag correctly through the popup
-      return isSignedIn();
-    }
-    
     function isOwner(userId) {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    function isMasterAdmin() {
-      return isSignedIn() && request.auth.token.email == 'andrewsantoss658@gmail.com';
+    function isAdmin() {
+      // Identity is verified against the 'users' collection flag or master email
+      return isSignedIn() && (
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true ||
+        request.auth.token.email == "andrewsantoss658@gmail.com"
+      );
     }
 
-    function isAdmin() {
-      return isMasterAdmin() || (isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true);
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
     }
 
     function isValidId(id) {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
-    // User profiles
-    match /users/{userId} {
-      allow get: if isSignedIn();
-      allow create: if isOwner(userId);
-      // Master admin can bypass key restrictions to bootstrap, normal owners are restricted
-      allow update: if isMasterAdmin() && isOwner(userId);
-      allow update: if isOwner(userId) && (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'photoURL', 'reputationScore', 'dailyCheckCount', 'lastCheckDate']));
-      allow update: if isAdmin();
-      allow list: if isAdmin();
+    // --- Entity Specific Validations ---
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['email', 'displayName', 'photoURL', 'isAdmin', 'isPremium', 'balance', 'reputationScore', 'createdAt', 'loginType', 'uid', 'fullName', 'birthDate', 'transactions'])
+          && data.email is string 
+          && data.displayName is string 
+          && data.fullName is string
+          && data.birthDate is string
+          && data.isAdmin is bool
+          && data.isPremium is bool
+          && data.balance is number
+          && data.reputationScore is number
+          && data.uid is string
+          && data.transactions is list;
     }
 
-    // Verifications
-    match /verifications/{id} {
-      allow list: if true; 
-      allow get: if true;
+    function isValidVerification(data) {
+      return data.keys().hasAll(['type', 'content', 'userId', 'createdAt'])
+          && data.type in ['text', 'image', 'video', 'link']
+          && data.userId is string
+          && (data.createdAt == request.time || data.createdAt is timestamp);
+    }
 
-      allow create: if (
-        (isSignedIn() && request.resource.data.userId == request.auth.uid) ||
-        (!isSignedIn() && request.resource.data.userId == 'anonymous')
-      );
+    // --- Collection Rules ---
 
-      // Only admins can delete/update
+    // USERS: Profile management
+    match /users/{userId} {
+      allow read: if true; // Allowed for server-side admin checks and profile sync
+      
+      allow create: if isSignedIn() 
+          && userId == request.auth.uid
+          && isValidUser(incoming())
+          && (incoming().isAdmin == false || request.auth.token.email == "andrewsantoss658@gmail.com")
+          && (incoming().isPremium == (request.auth.token.email == "andrewsantoss658@gmail.com") || incoming().isPremium == false)
+          && incoming().createdAt == request.time;
+
+      allow update: if isSignedIn() 
+          && (
+            (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'fullName', 'birthDate', 'balance', 'transactions', 'loginType']))
+            || 
+            (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['isAdmin', 'isPremium', 'balance', 'reputationScore', 'transactions']))
+          );
+      
+      allow delete: if isAdmin();
+    }
+
+    // VERIFICATIONS: Analysis logs (Publicly readable for history API)
+    match /verifications/{verifyId} {
+      allow read: if true;
+      
+      allow create: if isSignedIn() 
+          && isValidVerification(incoming())
+          && (incoming().userId == request.auth.uid);
+
       allow update, delete: if isAdmin();
     }
-    
-    // Metadata reports
-    match /metadata_reports/{id} {
+
+    // VIRAL TRENDS: Monitoring data
+    match /viral_trends/{trendId} {
       allow read: if true;
-      allow create: if isSignedIn();
+      allow write: if isAdmin() && isValidId(trendId);
     }
-    
-    // Known Fakes (Internal Base)
-    match /known_fakes/{id} {
+
+    // KNOWN FAKES & METADATA
+    match /known_fakes/{fakeId} {
       allow read: if true;
       allow write: if isAdmin();
     }
 
-    // Viral Trends
-    match /viral_trends/{id} {
-      allow read: if true;
-      allow write: if isAdmin();
+    match /metadata_reports/{reportId} {
+      allow get: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && incoming().userId == request.auth.uid;
     }
   }
 }

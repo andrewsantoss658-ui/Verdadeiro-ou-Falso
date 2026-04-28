@@ -18,18 +18,32 @@
       "type": "object",
       "properties": {
         "email": { "type": "string" },
+        "uid": { "type": "string" },
         "displayName": { "type": "string" },
+        "fullName": { "type": "string" },
+        "birthDate": { "type": "string" },
         "photoURL": { "type": "string" },
         "isAdmin": { "type": "boolean" },
         "isPremium": { "type": "boolean" },
         "balance": { "type": "number", "description": "Saldo em créditos do usuário." },
         "reputationScore": { "type": "number" },
-        "dailyCheckCount": { "type": "integer" },
-        "lastCheckDate": { "type": "string", "format": "date" },
         "loginType": { "type": "string", "enum": ["google", "x", "manual"] },
+        "transactions": { 
+          "type": "array", 
+          "items": { 
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "date": { "type": "string" },
+              "amount": { "type": "number" },
+              "type": { "type": "string" },
+              "description": { "type": "string" }
+            }
+          } 
+        },
         "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["email", "isAdmin", "isPremium"]
+      "required": ["email", "isAdmin", "isPremium", "uid"]
     },
     "verification": {
       "title": "Verificação",

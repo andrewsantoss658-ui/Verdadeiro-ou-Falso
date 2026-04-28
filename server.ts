@@ -1,12 +1,12 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
+import fs from "fs";
 import cors from "cors";
 import { initializeApp } from "firebase/app";
 import { 
   getFirestore, 
   collection, 
-  addDoc, 
   query, 
   where,
   orderBy, 
@@ -15,15 +15,20 @@ import {
   getDoc,
   doc,
   updateDoc,
-  Timestamp 
+  arrayUnion,
+  Timestamp
 } from "firebase/firestore";
-import firebaseConfig from "./firebase-applet-config.json";
+
+// Read Firebase config from JSON file
+const firebaseConfig = JSON.parse(
+  fs.readFileSync(path.join(process.cwd(), "firebase-applet-config.json"), "utf8")
+);
 
 import * as cheerio from "cheerio";
 import axios from "axios";
 import CryptoJS from "crypto-js";
 
-// Initialize Firebase
+// Initialize Firebase (Standard Client SDK for environment compatibility)
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
 
@@ -46,7 +51,6 @@ async function startServer() {
 
       const hash = CryptoJS.SHA256(content).toString();
       
-      // Look in global factory checking base first (High Authority)
       const qKnown = query(collection(db, "known_fakes"), where("hash", "==", hash), limit(1));
       const snapKnown = await getDocs(qKnown);
 
@@ -54,7 +58,6 @@ async function startServer() {
         return res.json({ cached: true, source: "internal_base", data: snapKnown.docs[0].data() });
       }
 
-      // Look in general verification logs (Low Authority Cache)
       const qLogs = query(collection(db, "verifications"), where("hash", "==", hash), limit(1));
       const snapLogs = await getDocs(qLogs);
 
@@ -63,7 +66,8 @@ async function startServer() {
       }
 
       res.json({ cached: false, hash });
-    } catch (err) {
+    } catch (err: any) {
+      console.error("Cache Error:", err);
       res.status(500).json({ error: "Cache check failed" });
     }
   });
@@ -85,7 +89,6 @@ async function startServer() {
       const title = $("title").text() || $("h1").first().text();
       const description = $('meta[name="description"]').attr("content") || $('meta[property="og:description"]').attr("content") || "";
       
-      // Domain reputation simulation
       const domain = new URL(url).hostname;
       const isDubious = /fake|suspicious|weird-news|clickbait/i.test(domain);
 
@@ -108,15 +111,13 @@ async function startServer() {
     }
   });
 
-  // Admin: Verification middleware
   const adminAuth = async (req: any, res: any, next: any) => {
     const adminId = req.headers["x-admin-id"];
     if (!adminId) return res.status(401).json({ error: "Unauthorized" });
     
     try {
-      const userRef = doc(db, "users", adminId as string);
-      const userSnap = await getDoc(userRef);
-      if (userSnap.exists() && userSnap.data().isAdmin) {
+      const userSnap = await getDoc(doc(db, "users", adminId as string));
+      if (userSnap.exists() && userSnap.data()?.isAdmin) {
         next();
       } else {
         res.status(403).json({ error: "Admin access required" });
@@ -126,7 +127,6 @@ async function startServer() {
     }
   };
 
-  // Admin Routes
   app.get("/api/admin/users", adminAuth, async (req, res) => {
     try {
       const snap = await getDocs(collection(db, "users"));
@@ -141,7 +141,23 @@ async function startServer() {
     const { userId, balance } = req.body;
     try {
       const userRef = doc(db, "users", userId);
-      await updateDoc(userRef, { balance: Number(balance) });
+      const userSnap = await getDoc(userRef);
+      const currentBalance = userSnap.exists() ? (userSnap.data().balance || 0) : 0;
+      const newBalance = Number(balance);
+      const diff = newBalance - currentBalance;
+
+      const transaction = {
+        id: `tx_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+        date: Timestamp.now(),
+        amount: Math.abs(diff),
+        type: diff > 0 ? "acquired" : "consumed",
+        description: "Ajuste administrativo de saldo"
+      };
+
+      await updateDoc(userRef, { 
+        balance: newBalance,
+        transactions: arrayUnion(transaction)
+      });
       res.json({ success: true });
     } catch (e) {
       res.status(500).json({ error: "Failed to update balance" });
@@ -151,8 +167,7 @@ async function startServer() {
   app.post("/api/admin/set-premium", adminAuth, async (req, res) => {
     const { userId, isPremium } = req.body;
     try {
-      const userRef = doc(db, "users", userId);
-      await updateDoc(userRef, { isPremium: !!isPremium });
+      await updateDoc(doc(db, "users", userId), { isPremium: !!isPremium });
       res.json({ success: true });
     } catch (e) {
       res.status(500).json({ error: "Failed to update premium status" });
@@ -163,11 +178,13 @@ async function startServer() {
     try {
       const { userId } = req.query;
       let q;
+      
       if (userId && userId !== "anonymous") {
         q = query(collection(db, "verifications"), where("userId", "==", userId), orderBy("createdAt", "desc"), limit(30));
       } else {
         q = query(collection(db, "verifications"), orderBy("createdAt", "desc"), limit(15));
       }
+      
       const snapshot = await getDocs(q);
       const history = snapshot.docs.map(doc => {
         const data = doc.data() as any;
@@ -178,12 +195,12 @@ async function startServer() {
         };
       });
       res.json(history);
-    } catch (error) {
+    } catch (error: any) {
+      console.error("History API Error:", error);
       res.status(500).json({ error: "Falha ao recuperar histórico." });
     }
   });
 
-  // Serve static assets
   const distPath = path.join(process.cwd(), "dist");
   if (process.env.NODE_ENV === "production") {
     app.use(express.static(distPath));

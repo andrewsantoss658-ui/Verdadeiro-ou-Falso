@@ -1,0 +1,126 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitives & Helpers ---
+    
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      // In production, we should check a trusted source, not just claims
+      // We look up the admin status in the 'users' collection
+      return isSignedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // --- Entity Specific Validations ---
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['email', 'displayName', 'photoURL', 'isAdmin', 'isPremium', 'balance', 'reputationScore', 'createdAt', 'loginType', 'uid'])
+          && data.keys().size() == 10
+          && data.email is string && data.email.size() <= 200
+          && data.displayName is string && data.displayName.size() <= 100
+          && data.isAdmin is bool
+          && data.isPremium is bool
+          && data.balance is number
+          && data.reputationScore is number
+          && data.uid == request.auth.uid
+          && data.loginType in ['google', 'manual', 'x'];
+    }
+
+    function isValidVerification(data) {
+      return data.keys().hasAll(['type', 'hash', 'content', 'reliabilityScore', 'riskLevel', 'sourceRating', 'result', 'explanation', 'technicalDetails', 'sources', 'userId', 'createdAt'])
+          && data.type in ['text', 'image', 'video', 'link']
+          && data.reliabilityScore is number && data.reliabilityScore >= 0 && data.reliabilityScore <= 100
+          && data.riskLevel in ['Baixo', 'Médio', 'Alto']
+          && data.userId == request.auth.uid
+          && data.createdAt == request.time;
+    }
+
+    // --- Collection Rules ---
+
+    // USERS: Profile management
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      
+      allow create: if isSignedIn() 
+          && isValidId(userId) 
+          && userId == request.auth.uid
+          && isValidUser(incoming())
+          && incoming().isAdmin == false // No self-promotion
+          && incoming().isPremium == false
+          && incoming().balance == 10 // Starting bonus
+          && incoming().createdAt == request.time;
+
+      allow update: if isSignedIn() 
+          && isValidId(userId)
+          && (
+            (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL']))
+            || 
+            (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['isAdmin', 'isPremium', 'balance', 'reputationScore']))
+          );
+      
+      allow delete: if isAdmin();
+    }
+
+    // VERIFICATIONS: Analysis logs
+    match /verifications/{verifyId} {
+      // Secure List: Explicitly check resource.data to prevent scraping
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow get: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      
+      allow create: if isSignedIn() 
+          && isValidId(verifyId)
+          && isValidVerification(incoming())
+          && (incoming().userId == request.auth.uid);
+
+      // Verifications are immutable snapshots
+      allow update, delete: if isAdmin();
+    }
+
+    // VIRAL TRENDS: Monitoring data
+    match /viral_trends/{trendId} {
+      allow read: if true; // Publicly readable for the monitor
+      
+      allow write: if isAdmin() && isValidId(trendId);
+    }
+
+    // KNOWN FAKES & METADATA
+    match /known_fakes/{fakeId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /metadata_reports/{reportId} {
+      allow get: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && incoming().userId == request.auth.uid;
+    }
+  }
+}

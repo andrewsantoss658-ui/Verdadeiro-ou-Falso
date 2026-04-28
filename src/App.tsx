@@ -17,7 +17,9 @@ import {
   Timestamp,
   doc,
   getDocFromServer,
-  updateDoc
+  updateDoc,
+  arrayUnion,
+  serverTimestamp
 } from "firebase/firestore";
 import { 
   getAuth, 
@@ -66,7 +68,12 @@ import {
   Key,
   Smartphone,
   Eye,
-  EyeOff
+  EyeOff,
+  CreditCard,
+  Coins,
+  Clock,
+  Bell,
+  Star
 } from "lucide-react";
 import CryptoJS from "crypto-js";
 
@@ -82,6 +89,44 @@ const googleProvider = new GoogleAuthProvider();
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
 type VerificationType = "text" | "image" | "video" | "link";
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+  }
+}
+
+const handleFirestoreError = (error: unknown, operationType: OperationType, path: string | null) => {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Diagnostic:', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+};
+
 type ViewMode = "dashboard" | "history" | "investigator" | "admin" | "support" | "settings" | "api" | "terms" | "privacy" | "status" | "api_docs" | "profile";
 type Theme = "light" | "dark" | "system";
 
@@ -103,10 +148,20 @@ interface Verification {
   feedbackVotes?: { up: number, down: number };
 }
 
+interface Transaction {
+  id: string;
+  date: any;
+  amount: number;
+  type: "acquired" | "consumed" | "adjustment";
+  description: string;
+}
+
 interface UserProfile {
   uid: string;
   email: string;
   displayName: string;
+  fullName?: string;
+  birthDate?: string;
   photoURL: string;
   isAdmin?: boolean;
   isPremium?: boolean;
@@ -114,6 +169,7 @@ interface UserProfile {
   loginType: "google" | "manual";
   balance?: number;
   createdAt: any;
+  transactions?: Transaction[];
 }
 
 export default function App() {
@@ -146,20 +202,45 @@ export default function App() {
   const [authMethod, setAuthMethod] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [manualDisplayName, setManualDisplayName] = useState("");
+  const [birthDate, setBirthDate] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
+
+  // Notifications
+  const [notifications, setNotifications] = useState<{ id: string, message: string, type: "success" | "error" | "info" }[]>([]);
+
+  const addNotification = (message: string, type: "success" | "error" | "info" = "info") => {
+    const id = Math.random().toString(36).substring(7);
+    setNotifications(prev => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setNotifications(prev => prev.filter(n => n.id !== id));
+    }, 4000);
+  };
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    const testConnection = async () => {
+      try {
+        await getDocFromServer(doc(db, 'test', 'connection'));
+      } catch (error) {
+        if(error instanceof Error && error.message.includes('the client is offline')) {
+          console.error("Please check your Firebase configuration or network status.");
+        }
+      }
+    };
+    testConnection();
+    
     fetchViralTrends();
     const interval = setInterval(fetchViralTrends, 300000); // 5 min
     return () => clearInterval(interval);
   }, []);
 
   const fetchViralTrends = async () => {
+    const path = "viral_trends";
     try {
-      const q = query(collection(db, "viral_trends"), orderBy("updatedAt", "desc"), limit(5));
+      const q = query(collection(db, path), orderBy("updatedAt", "desc"), limit(5));
       const snap = await getDocs(q);
       if (snap.empty) {
         // Fallback or Initial Data
@@ -171,49 +252,88 @@ export default function App() {
         setViralTrends(snap.docs.map(d => ({ id: d.id, ...d.data() })));
       }
     } catch (e) {
+      if (e instanceof Error && (e.message.includes("permission") || e.message.includes("denied"))) {
+        handleFirestoreError(e, OperationType.LIST, path);
+      }
       console.error("Erro ao carregar tendências");
     }
   };
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
+      const usersPath = "users";
       try {
         if (u) {
           // Fetch/Sync User Profile using Doc ID = UID
-          const userRef = doc(db, "users", u.uid);
-          const userSnap = await getDoc(userRef);
+          const userRef = doc(db, usersPath, u.uid);
+          let userSnap;
+          try {
+            userSnap = await getDoc(userRef);
+          } catch (e) {
+            handleFirestoreError(e, OperationType.GET, `${usersPath}/${u.uid}`);
+            return;
+          }
           
           const isMasterAdmin = u.email === "andrewsantoss658@gmail.com";
           const identifiedLoginType = u.providerData[0]?.providerId === "google.com" ? "google" : "manual";
           
           let profile: UserProfile;
           if (!userSnap.exists()) {
+            const signupName = localStorage.getItem("sentinel_signup_name");
+            const signupBirth = localStorage.getItem("sentinel_signup_birth");
+            
             const newProfile: UserProfile = {
               uid: u.uid,
               email: u.email!,
-              displayName: u.displayName || manualDisplayName || "Agente Sentinel",
-              photoURL: u.photoURL || `https://ui-avatars.com/api/?name=${u.displayName || "Agente"}`,
+              displayName: signupName || u.displayName || "Agente Sentinel",
+              fullName: signupName || u.displayName || "",
+              birthDate: signupBirth || "",
+              photoURL: u.photoURL || `https://ui-avatars.com/api/?name=${signupName || u.displayName || "Agente"}`,
               isAdmin: isMasterAdmin,
               isPremium: isMasterAdmin,
               loginType: identifiedLoginType,
-              balance: isMasterAdmin ? 1000 : 0,
+              balance: isMasterAdmin ? 1000 : 10,
               reputationScore: 100,
-              createdAt: Timestamp.now()
+              createdAt: Timestamp.now(),
+              transactions: []
             };
-            await setDoc(userRef, newProfile);
+            try {
+              await setDoc(userRef, newProfile);
+              localStorage.removeItem("sentinel_signup_name");
+              localStorage.removeItem("sentinel_signup_birth");
+            } catch (e) {
+              handleFirestoreError(e, OperationType.WRITE, `${usersPath}/${u.uid}`);
+            }
             profile = newProfile;
           } else {
             profile = userSnap.data() as UserProfile;
+            // Sync displayName if missing or generic
+            if (u.displayName && (profile.displayName === "Agente Sentinel" || !profile.displayName)) {
+               profile.displayName = u.displayName;
+               try {
+                 await updateDoc(userRef, { displayName: u.displayName });
+               } catch (e) {
+                 handleFirestoreError(e, OperationType.UPDATE, `${usersPath}/${u.uid}`);
+               }
+            }
             // Sync loginType if missing
             if (!profile.loginType) {
                profile.loginType = identifiedLoginType;
-               await updateDoc(userRef, { loginType: identifiedLoginType });
+               try {
+                 await updateDoc(userRef, { loginType: identifiedLoginType });
+               } catch (e) {
+                 handleFirestoreError(e, OperationType.UPDATE, `${usersPath}/${u.uid}`);
+               }
             }
             // Ensure master admin always has privileges even if manually revoked in DB
             if (isMasterAdmin && !profile.isAdmin) {
               profile.isAdmin = true;
               profile.isPremium = true;
-              await updateDoc(userRef, { isAdmin: true, isPremium: true });
+              try {
+                await updateDoc(userRef, { isAdmin: true, isPremium: true });
+              } catch (e) {
+                handleFirestoreError(e, OperationType.UPDATE, `${usersPath}/${u.uid}`);
+              }
             }
           }
           setUser(profile);
@@ -312,16 +432,37 @@ export default function App() {
 
     try {
       if (authMethod === "signup") {
+        if (password !== confirmPassword) {
+          throw new Error("As senhas não coincidem.");
+        }
+        if (!manualDisplayName || !birthDate) {
+          throw new Error("Preencha todos os campos obrigatórios.");
+        }
+        // Store transient signup data for profile creation in onAuthStateChanged
+        localStorage.setItem("sentinel_signup_name", manualDisplayName);
+        localStorage.setItem("sentinel_signup_birth", birthDate);
+
         const credential = await createUserWithEmailAndPassword(auth, email, password);
         await updateProfile(credential.user, { displayName: manualDisplayName });
-        // Profile creation is handled by onAuthStateChanged
       } else {
         await signInWithEmailAndPassword(auth, email, password);
       }
       setShowAuthModal(false);
       resetAuthForm();
     } catch (err: any) {
-      setError(err.message || "Erro na autenticação manual.");
+      if (err.code === "auth/operation-not-allowed") {
+        setError("O login por e-mail/senha não está habilitado no Firebase Console. Por favor, habilite o provedor 'E-mail/senha' na aba Autenticação.");
+      } else if (err.code === 'auth/email-already-in-use') {
+        setError("Este e-mail já está em uso.");
+      } else if (err.code === 'auth/weak-password') {
+        setError("A senha deve ter pelo menos 6 caracteres.");
+      } else if (err.code === 'auth/invalid-email') {
+        setError("E-mail inválido.");
+      } else if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') {
+        setError("E-mail ou senha incorretos.");
+      } else {
+        setError(err.message || "Erro na autenticação manual.");
+      }
     } finally {
       setAuthLoading(false);
     }
@@ -330,7 +471,9 @@ export default function App() {
   const resetAuthForm = () => {
     setEmail("");
     setPassword("");
+    setConfirmPassword("");
     setManualDisplayName("");
+    setBirthDate("");
   };
 
   const handleGoogleLogin = async () => {
@@ -352,8 +495,8 @@ export default function App() {
   };
 
   const verify = async () => {
-    if (!user && checkCount >= 1) {
-      setError("Limite de convidado atingido. Crie uma conta gratuita para continuar.");
+    if (!user && checkCount >= 5) {
+      setError("Limite de 5 perguntas para convidados atingido. Crie uma conta gratuita para continuar verificando sem limites!");
       return;
     }
 
@@ -378,6 +521,16 @@ export default function App() {
       } else if (activeTab === "image") {
         if (!filePreview) throw new Error("Nenhuma imagem selecionada.");
         contentToHash = filePreview.substring(0, 5000); // Sampling
+      } else if (activeTab === "video") {
+        if (!file) throw new Error("Nenhum vídeo selecionado.");
+        contentToHash = file.name + file.size; // Simple hash for video
+      }
+
+      // Check Credits
+      if (user && !user.isAdmin && !user.isPremium) {
+        if ((user.balance || 0) <= 0) {
+          throw new Error("Saldo insuficiente. Adquira mais créditos em seu perfil.");
+        }
       }
 
       // Layer 1: Cache Check
@@ -439,26 +592,72 @@ export default function App() {
       }
 
       analysis = JSON.parse(aiResponse.text.trim());
+      
+      // Enhance response for Video/Deepfake
+      if (activeTab === "video") {
+        analysis.technicalDetails = `[ANALISANDO ARQUIVO DE VÍDEO] ${analysis.technicalDetails}`;
+      }
 
       const finalRecord: Verification = {
         type: activeTab,
-        content: urlInput || inputText || "Arquivo de Mídia",
+        content: urlInput || inputText || (activeTab === "video" ? `Vídeo: ${file?.name}` : "Arquivo de Mídia"),
         hash,
         ...analysis,
+        reliabilityScore: Number(analysis.reliabilityScore) || 0,
         userId: user?.uid || "anonymous",
-        createdAt: Timestamp.now(),
+        createdAt: serverTimestamp(),
         feedbackVotes: { up: 0, down: 0 }
       };
 
-      // Save & Update
-      await addDoc(collection(db, "verifications"), finalRecord);
+      // Save & Update (Persistence only for authenticated users)
+      if (user) {
+        const path = "verifications";
+        console.log("SENTINEL DIAGNOSTIC: Attempting verification creation with:", JSON.stringify({
+          ...finalRecord,
+          createdAt: "SENTINEL_SERVER_TIMESTAMP"
+        }));
+        try {
+          await addDoc(collection(db, path), finalRecord);
+        } catch (e) {
+          handleFirestoreError(e, OperationType.CREATE, path);
+        }
+      }
+
       setResult({ ...finalRecord, createdAt: new Date().toISOString() });
 
       if (!user) {
         const nc = checkCount + 1;
         setCheckCount(nc);
         localStorage.setItem("sentinel_checks", nc.toString());
+      } else if (!user.isAdmin && !user.isPremium) {
+        // Deduct 1 credit
+        const newBalance = Math.max(0, (user.balance || 0) - 1);
+        const transaction: Transaction = {
+          id: `tx_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+          date: Timestamp.now(),
+          amount: 1,
+          type: "consumed",
+          description: `Análise Sentinel: ${activeTab}`
+        };
+
+        const userRef = doc(db, "users", user.uid);
+        try {
+          await updateDoc(userRef, { 
+            balance: newBalance,
+            transactions: arrayUnion(transaction)
+          });
+        } catch (e) {
+          handleFirestoreError(e, OperationType.UPDATE, `users/${user.uid}`);
+        }
+
+        setUser({ 
+          ...user, 
+          balance: newBalance,
+          transactions: user.transactions ? [...user.transactions, transaction] : [transaction]
+        });
+        addNotification("1 crédito Sentinel utilizado.", "info");
       }
+
       fetchHistory(user?.uid);
     } catch (err: any) {
       setError(err.message || "Erro crítico no motor de análise.");
@@ -581,6 +780,166 @@ export default function App() {
         <div className="max-w-5xl mx-auto p-12 space-y-12">
           {view === "dashboard" && (
             <>
+              {!user && (
+                <section className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
+                  <div className="card-pro p-10 bg-gradient-to-br from-blue-700 via-blue-600 to-indigo-700 text-white border-none shadow-2xl overflow-hidden relative group h-full">
+                    <div className="absolute top-0 right-0 p-8 opacity-10 group-hover:scale-110 transition-transform">
+                      <ShieldCheck className="w-48 h-48" />
+                    </div>
+                    <div className="relative z-10 space-y-8">
+                      <div className="inline-flex items-center gap-2 px-3 py-1 bg-white/10 rounded-full text-[10px] font-black uppercase tracking-widest backdrop-blur-md">
+                        <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
+                        Acesso Agente Sentinel
+                      </div>
+                      <h2 className="text-4xl font-display font-black leading-tight">
+                        Proteja a Verdade. <br /> 
+                        <span className="text-blue-200">Crie sua conta agora.</span>
+                      </h2>
+                      <p className="text-blue-100/80 leading-relaxed font-medium">
+                        Tenha acesso a logs históricos, análise de deepfakes em vídeo e seu score de reputação de agente em tempo real.
+                      </p>
+                      
+                      <div className="space-y-4 pt-4">
+                         {[
+                           "Checks ilimitados p/ Premium",
+                           "Detecção Forense de Imagens",
+                           "Histórico de Integridade Global"
+                         ].map((item, i) => (
+                           <div key={i} className="flex items-center gap-3">
+                             <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                             <span className="text-sm font-medium text-blue-50">{item}</span>
+                           </div>
+                         ))}
+                      </div>
+
+                      <div className="pt-8">
+                         <div className="flex -space-x-4">
+                            {[1,2,3,4].map(i => (
+                              <img key={i} src={`https://i.pravatar.cc/100?u=${i}`} className="w-10 h-10 rounded-full border-4 border-blue-600" />
+                            ))}
+                            <div className="w-10 h-10 rounded-full bg-blue-500 border-4 border-blue-600 flex items-center justify-center text-[10px] font-bold">+9k</div>
+                         </div>
+                         <p className="text-[10px] text-blue-200 mt-3 font-bold uppercase tracking-widest">Agentes Ativos na Rede Sentinel</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="card-pro p-8 bg-white dark:bg-slate-900 shadow-xl space-y-6">
+                    <div className="flex bg-slate-100 dark:bg-slate-800 p-1.5 rounded-2xl w-full">
+                       <button 
+                         onClick={() => setAuthMethod('login')}
+                         className={`flex-1 py-3 text-xs font-black uppercase tracking-widest rounded-xl transition-all ${authMethod === 'login' ? 'bg-white dark:bg-slate-700 text-blue-600 shadow-sm' : 'text-slate-500'}`}
+                       >
+                         Entrar
+                       </button>
+                       <button 
+                         onClick={() => setAuthMethod('signup')}
+                         className={`flex-1 py-3 text-xs font-black uppercase tracking-widest rounded-xl transition-all ${authMethod === 'signup' ? 'bg-white dark:bg-slate-700 text-blue-600 shadow-sm' : 'text-slate-500'}`}
+                       >
+                         Criar Conta
+                       </button>
+                    </div>
+
+                    <div className="space-y-6">
+                      <button 
+                        onClick={handleGoogleLogin}
+                        className="w-full py-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl flex items-center justify-center gap-3 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all group"
+                      >
+                        <Globe className="w-5 h-5 text-slate-600 group-hover:text-blue-500" />
+                        <span className="text-sm font-bold text-slate-700 dark:text-slate-200">Prosseguir com Google</span>
+                      </button>
+
+                      <div className="relative">
+                        <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-100 dark:border-slate-800" /></div>
+                        <div className="relative flex justify-center text-[10px] uppercase font-black tracking-widest"><span className="bg-white dark:bg-slate-900 px-4 text-slate-400">ou preencher manualmente</span></div>
+                      </div>
+
+                      <form onSubmit={handleManualAuth} className="space-y-4">
+                        {authMethod === 'signup' && (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div className="relative">
+                              <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                              <input
+                                type="text"
+                                placeholder="Nome Completo"
+                                required
+                                value={manualDisplayName}
+                                onChange={(e) => setManualDisplayName(e.target.value)}
+                                className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
+                              />
+                            </div>
+                            <div className="relative">
+                              <History className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                              <input
+                                type="date"
+                                required
+                                value={birthDate}
+                                onChange={(e) => setBirthDate(e.target.value)}
+                                className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-[11px] font-bold outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="relative">
+                          <Globe className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                          <input
+                            type="email"
+                            placeholder="E-mail"
+                            required
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
+                          />
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="relative">
+                            <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                            <input
+                              type="password"
+                              placeholder="Senha"
+                              required
+                              value={password}
+                              onChange={(e) => setPassword(e.target.value)}
+                              className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
+                            />
+                          </div>
+                          {authMethod === 'signup' && (
+                            <div className="relative">
+                              <RefreshCcw className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                              <input
+                                type="password"
+                                placeholder="Confirmar Senha"
+                                required
+                                value={confirmPassword}
+                                onChange={(e) => setConfirmPassword(e.target.value)}
+                                className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
+                              />
+                            </div>
+                          )}
+                        </div>
+
+                        <button 
+                          type="submit"
+                          disabled={authLoading}
+                          className="btn-primary w-full shadow-xl shadow-blue-500/20 py-4 font-black uppercase tracking-widest disabled:opacity-50"
+                        >
+                          {authLoading ? <Loader2 className="w-5 h-5 animate-spin mx-auto" /> : authMethod === 'login' ? 'Autenticar Agente' : 'Registrar na Rede'}
+                        </button>
+                      </form>
+                      
+                      {error && (
+                        <div className="flex items-center gap-3 p-4 bg-rose-50 dark:bg-rose-900/20 border border-rose-100 dark:border-rose-800 rounded-2xl">
+                          <AlertTriangle className="w-4 h-4 text-rose-500" />
+                          <p className="text-[10px] font-bold text-rose-600 dark:text-rose-400 uppercase tracking-wider">{error}</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </section>
+              )}
+
               {/* Verification Tools */}
               <section className="space-y-8">
                 <div className="flex flex-col gap-2">
@@ -661,9 +1020,40 @@ export default function App() {
                     )}
 
                     {activeTab === "video" && (
-                      <div className="w-full h-48 border-2 border-dashed border-slate-200 rounded-2xl flex flex-col items-center justify-center bg-slate-50/50 opacity-60">
-                        <Lock className="w-8 h-8 text-slate-300 mb-4" />
-                        <p className="text-sm font-semibold text-slate-500 italic">Módulo de Vídeo Biométrico indisponível no Plano Free</p>
+                      <div 
+                        onClick={() => {
+                          if (user?.isPremium || user?.isAdmin) {
+                            fileInputRef.current?.click();
+                          }
+                        }}
+                        className={`w-full h-48 border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-2xl flex flex-col items-center justify-center bg-slate-50 dark:bg-slate-950 transition-all ${user?.isPremium || user?.isAdmin ? "hover:bg-slate-100 dark:hover:bg-slate-900 cursor-pointer group" : "opacity-60"}`}
+                      >
+                        {filePreview && (user?.isPremium || user?.isAdmin) ? (
+                          <div className="flex flex-col items-center justify-center p-4">
+                            <Video className="w-12 h-12 text-blue-500 mb-2" />
+                            <p className="text-xs font-medium text-slate-600 dark:text-slate-300 truncate max-w-xs">{file?.name}</p>
+                          </div>
+                        ) : (user?.isPremium || user?.isAdmin) ? (
+                          <>
+                            <Upload className="w-8 h-8 text-slate-300 group-hover:text-blue-500 mb-4" />
+                            <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">Arraste o vídeo ou clique p/ carregar</p>
+                            <p className="text-[10px] text-slate-400 uppercase tracking-widest mt-2 font-bold">Análise Biométrica e Padrões Neurais</p>
+                          </>
+                        ) : (
+                          <>
+                            <Lock className="w-8 h-8 text-slate-300 mb-4" />
+                            <p className="text-sm font-semibold text-slate-500 italic">Módulo de Vídeo Biométrico exclusivo para Planos Premium / Admin</p>
+                          </>
+                        )}
+                        <input type="file" accept="video/*" ref={fileInputRef} onChange={(e) => {
+                          if (e.target.files?.[0]) {
+                            const f = e.target.files[0];
+                            setFile(f);
+                            // For videos we don't display a full preview easily without a <video> tag, 
+                            // but we can at least show the filename.
+                            setFilePreview("video-placeholder"); 
+                          }
+                        }} className="hidden" />
                       </div>
                     )}
 
@@ -779,13 +1169,14 @@ export default function App() {
                               onClick={async () => {
                                 if (!result) return;
                                 try {
+                                  const { id, ...fakeData } = result;
                                   await addDoc(collection(db, "known_fakes"), {
-                                    ...result,
-                                    createdAt: Timestamp.now()
+                                    ...fakeData,
+                                    createdAt: serverTimestamp()
                                   });
-                                  alert("Adicionado à Base Global de Fatos!");
+                                  addNotification("Adicionado à Base Global de Fatos!", "success");
                                 } catch (e) {
-                                  alert("Erro ao promover resultado.");
+                                  handleFirestoreError(e, OperationType.CREATE, "known_fakes");
                                 }
                               }}
                               className="btn-secondary border-blue-200 text-blue-600 hover:bg-blue-50"
@@ -793,11 +1184,53 @@ export default function App() {
                               Promover à Base Global
                             </button>
                           )}
-                          <button className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-slate-400 border border-slate-200 px-4 py-2 rounded-lg hover:bg-slate-50 transition-colors">
-                            <ThumbsUp className="w-3.5 h-3.5" /> Útil
+                          <button 
+                            onClick={async () => {
+                              if (!result?.id) return;
+                              try {
+                                const docRef = doc(db, "verifications", result.id);
+                                await updateDoc(docRef, {
+                                  "feedbackVotes.up": (result.feedbackVotes?.up || 0) + 1
+                                });
+                                setResult({
+                                  ...result,
+                                  feedbackVotes: {
+                                    ...result.feedbackVotes!,
+                                    up: (result.feedbackVotes?.up || 0) + 1
+                                  }
+                                });
+                                addNotification("Feedback registrado!", "success");
+                              } catch (e) {
+                                console.error("Erro ao votar", e);
+                              }
+                            }}
+                            className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-slate-400 border border-slate-200 px-4 py-2 rounded-lg hover:bg-slate-50 transition-colors"
+                          >
+                            <ThumbsUp className="w-3.5 h-3.5" /> Útil ({result.feedbackVotes?.up || 0})
                           </button>
-                          <button className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-slate-400 border border-slate-200 px-4 py-2 rounded-lg hover:bg-slate-50 transition-colors">
-                            <ThumbsDown className="w-3.5 h-3.5" /> Irrelevante
+                          <button 
+                            onClick={async () => {
+                              if (!result?.id) return;
+                              try {
+                                const docRef = doc(db, "verifications", result.id);
+                                await updateDoc(docRef, {
+                                  "feedbackVotes.down": (result.feedbackVotes?.down || 0) + 1
+                                });
+                                setResult({
+                                  ...result,
+                                  feedbackVotes: {
+                                    ...result.feedbackVotes!,
+                                    down: (result.feedbackVotes?.down || 0) + 1
+                                  }
+                                });
+                                addNotification("Feedback registrado!", "info");
+                              } catch (e) {
+                                console.error("Erro ao votar", e);
+                              }
+                            }}
+                            className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-slate-400 border border-slate-200 px-4 py-2 rounded-lg hover:bg-slate-50 transition-colors"
+                          >
+                            <ThumbsDown className="w-3.5 h-3.5" /> Irrelevante ({result.feedbackVotes?.down || 0})
                           </button>
                         </div>
                       </div>
@@ -1198,28 +1631,220 @@ export default function App() {
 
           {view === "profile" && (
             <section className="space-y-12">
-               <div className="flex flex-col gap-2">
-                <h3 className="font-display font-bold text-3xl dark:text-white">Perfil do Agente</h3>
-                <p className="text-slate-500 dark:text-slate-400">Informações e identidade no ecossistema Sentinel.</p>
-              </div>
-              <div className="max-w-xl card-pro p-10 dark:bg-slate-900 border-none text-center space-y-6">
-                 <img src={user?.photoURL} className="w-24 h-24 rounded-3xl mx-auto shadow-2xl border-4 border-white dark:border-slate-800" />
-                 <div className="space-y-1">
-                    <h4 className="font-display font-bold text-xl dark:text-white">{user?.displayName}</h4>
-                    <p className="text-sm text-slate-500">{user?.email}</p>
-                 </div>
-                 <div className="flex justify-center gap-2">
-                    {user?.email === "andrewsantoss658@gmail.com" && (
-                      <span className="status-badge bg-rose-600 text-white border-none shadow-lg shadow-rose-500/20"> Master Admin 🛡️ </span>
-                    )}
-                    <span className="status-badge bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">{user?.isPremium ? "Assinante Premium" : "Agente Estagiário (Free)"}</span>
-                    <span className="status-badge bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Score {user?.reputationScore || 100}</span>
-                 </div>
-                 <div className="pt-8 flex flex-col gap-3">
-                    <button onClick={() => setView("dashboard")} className="btn-primary w-full">Voltar para o Painel</button>
-                    <button onClick={handleLogout} className="text-xs font-bold text-rose-500 hover:underline uppercase tracking-widest">Encerrar Sessão</button>
-                 </div>
-              </div>
+               {/* Dashboard Header */}
+               <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 pb-8 border-b border-slate-100 dark:border-slate-800">
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-4">
+                      <div className="relative">
+                        <img src={user?.photoURL} className="w-24 h-24 rounded-3xl object-cover shadow-2xl border-4 border-white dark:border-slate-800" />
+                        <div className="absolute -bottom-1 -right-1 w-8 h-8 bg-emerald-500 rounded-full border-4 border-white dark:border-slate-950 flex items-center justify-center">
+                          <ShieldCheck className="w-4 h-4 text-white" />
+                        </div>
+                      </div>
+                      <div>
+                        <h2 className="font-display font-bold text-3xl dark:text-white">{user?.displayName}</h2>
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className="text-sm text-slate-500 font-medium">{user?.email}</span>
+                          <div className="w-1 h-1 rounded-full bg-slate-300" />
+                          <span className="text-xs font-bold text-blue-600 uppercase tracking-widest">{user?.isPremium ? 'Agente Veterano' : 'Agente Recruta'}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <div className="flex gap-3">
+                    <button onClick={handleLogout} className="btn-secondary flex items-center gap-2"><LogOut className="w-4 h-4" /> Sair</button>
+                    <button onClick={() => setView("dashboard")} className="btn-primary flex items-center gap-2">Analisar Agora</button>
+                  </div>
+               </div>
+
+               {/* Stats Grid */}
+               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="card-pro p-8 relative overflow-hidden bg-gradient-to-br from-blue-600 to-blue-800 text-white border-none shadow-2xl shadow-blue-500/20">
+                    <Coins className="absolute -right-4 -bottom-4 w-32 h-32 text-white/10" />
+                    <div className="relative z-10 space-y-4">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-blue-100">Saldo Sentinel</p>
+                      <h4 className="text-5xl font-mono font-bold tracking-tighter">
+                        {user?.isAdmin || user?.isPremium ? '∞' : (user?.balance || 0)}
+                        <span className="text-lg ml-2 opacity-60">SC</span>
+                      </h4>
+                      <p className="text-[10px] font-medium text-blue-100/80">Créditos disponíveis para verificação avançada.</p>
+                    </div>
+                  </div>
+
+                  <div className="card-pro p-8 bg-white dark:bg-slate-900 border-none flex flex-col justify-between">
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Engajamento</p>
+                      <h4 className="text-4xl font-mono font-bold dark:text-white">
+                        {history.length}
+                        <span className="text-lg ml-2 text-slate-400 font-medium font-sans">Análises</span>
+                      </h4>
+                    </div>
+                    <div className="flex items-center gap-2 text-emerald-500 font-bold text-xs mt-4">
+                      <TrendingUp className="w-4 h-4" />
+                      <span>+12% esta semana</span>
+                    </div>
+                  </div>
+
+                  <div className="card-pro p-8 bg-emerald-50 dark:bg-emerald-950/30 border-emerald-100 dark:border-emerald-900/50 flex flex-col justify-between border-none">
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600/60 dark:text-emerald-400/60 mb-2">Score de Reputação</p>
+                      <h4 className="text-4xl font-mono font-bold text-emerald-700 dark:text-emerald-400">
+                        {user?.reputationScore || 100}
+                        <span className="text-lg ml-2 opacity-60">/ 100</span>
+                      </h4>
+                    </div>
+                    <div className="flex items-center gap-2 text-emerald-600/60 text-xs mt-4">
+                       <Star className="w-4 h-4 fill-emerald-500 text-emerald-500" />
+                       <span>Nível de Agente Confiável</span>
+                    </div>
+                  </div>
+               </div>
+
+               {/* History and Actions */}
+               <div className="grid grid-cols-1 lg:grid-cols-5 gap-12">
+                  <div className="lg:col-span-3 space-y-8">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Clock className="w-5 h-5 text-slate-400" />
+                        <h3 className="font-display font-bold text-xl dark:text-white">Histórico Recente</h3>
+                      </div>
+                      <button onClick={() => setView("history")} className="text-xs font-bold text-blue-600 hover:underline">Ver tudo</button>
+                    </div>
+
+                    <div className="space-y-4">
+                      {history.length === 0 ? (
+                        <div className="card-pro p-12 text-center border-dashed dark:bg-slate-900 border-none">
+                          <p className="text-slate-500 text-sm">Nenhuma verificação realizada ainda.</p>
+                        </div>
+                      ) : (
+                        history.slice(0, 5).map((item) => (
+                          <div key={item.id} className="flex items-center gap-4 p-4 hover:bg-slate-50 dark:hover:bg-slate-800/40 rounded-2xl transition-all group">
+                            <div className={`w-2 h-2 rounded-full ${item.reliabilityScore > 80 ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+                            <div className="flex-grow min-w-0">
+                              <p className="text-sm font-bold dark:text-white truncate">{item.content}</p>
+                              <p className="text-[10px] text-slate-500 font-medium italic">{new Date(item.createdAt).toLocaleDateString()} &bull; {item.type}</p>
+                            </div>
+                            <div className="text-right shrink-0">
+                               <p className="text-xs font-black dark:text-slate-300">{item.result}</p>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+
+                    {/* Credit Transactions History */}
+                    <div className="pt-12 space-y-8">
+                       <div className="flex items-center gap-2">
+                        <Coins className="w-5 h-5 text-amber-500" />
+                        <h3 className="font-display font-bold text-xl dark:text-white">Fluxo de Créditos</h3>
+                      </div>
+                      <div className="card-pro p-6 dark:bg-slate-900 border-none space-y-4 max-h-[400px] overflow-y-auto custom-scrollbar">
+                        {(!user?.transactions || user.transactions.length === 0) ? (
+                          <p className="text-xs text-slate-500 text-center py-8">Nenhuma movimentação financeira registrada.</p>
+                        ) : (
+                          [...user.transactions].reverse().map((tx) => (
+                            <div key={tx.id} className="flex items-center justify-between p-3 border-b border-slate-50 dark:border-slate-800 last:border-none">
+                               <div className="flex items-center gap-3">
+                                  <div className={`p-2 rounded-lg ${tx.type === 'acquired' ? 'bg-emerald-50 text-emerald-600' : tx.type === 'consumed' ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-600'}`}>
+                                     {tx.type === 'acquired' ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
+                                  </div>
+                                  <div>
+                                     <p className="text-xs font-bold dark:text-white">{tx.description}</p>
+                                     <p className="text-[10px] text-slate-400 font-medium">{new Date(tx.date.seconds ? tx.date.toDate() : tx.date).toLocaleString()}</p>
+                                  </div>
+                               </div>
+                               <div className="text-right">
+                                  <p className={`text-xs font-black ${tx.type === 'acquired' ? 'text-emerald-500' : 'text-slate-500'}`}>
+                                     {tx.type === 'acquired' ? '+' : '-'}{tx.amount}
+                                  </p>
+                                  <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest">{tx.type}</p>
+                               </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="lg:col-span-2 space-y-8">
+                    <div className="flex items-center gap-2">
+                      <CreditCard className="w-5 h-5 text-slate-400" />
+                      <h3 className="font-display font-bold text-xl dark:text-white">Adquirir Créditos</h3>
+                    </div>
+
+                    <div className="space-y-4">
+                       {[
+                         { id: "10c", amount: 10, price: "Grátis", label: "Teste Inicial", limit: true },
+                         { id: "50c", amount: 50, price: "$9.90", label: "Agente Ativo", best: false },
+                         { id: "unlimited", amount: "∞", price: "$29.90", label: "Mestre da Verdade", best: true }
+                       ].map((pack) => (
+                         <div 
+                           key={pack.id} 
+                           onClick={async () => {
+                             if (!user) return;
+                             if (pack.amount === "∞") {
+                               addNotification("Upgrade para Premium solicitado. Redirecionando para checkout...", "info");
+                               // Simulation
+                               setTimeout(async () => {
+                                 await updateDoc(doc(db, "users", user.uid), { isPremium: true });
+                                 setUser({ ...user, isPremium: true });
+                                 addNotification("Parabéns! Você agora é um Mestre da Verdade.", "success");
+                               }, 2000);
+                             } else {
+                               const addon = typeof pack.amount === 'number' ? pack.amount : 0;
+                               const newTotal = (user.balance || 0) + addon;
+                               
+                               const transaction: Transaction = {
+                                 id: `tx_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                                 date: Timestamp.now(),
+                                 amount: addon,
+                                 type: "acquired",
+                                 description: `Compra de Créditos: Pacote ${pack.label}`
+                               };
+
+                               await updateDoc(doc(db, "users", user.uid), { 
+                                 balance: newTotal,
+                                 transactions: arrayUnion(transaction)
+                               });
+
+                               setUser({ 
+                                 ...user, 
+                                 balance: newTotal,
+                                 transactions: user.transactions ? [...user.transactions, transaction] : [transaction]
+                               });
+                               addNotification(`${addon} créditos adicionados com sucesso!`, "success");
+                             }
+                           }}
+                           className={`relative p-6 rounded-[2rem] border-2 cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98] ${pack.best ? 'border-blue-500 bg-blue-50/30 dark:bg-blue-900/10' : 'border-slate-100 dark:border-slate-800'}`}
+                         >
+                           {pack.best && <span className="absolute -top-3 left-6 px-3 py-1 bg-blue-500 text-white text-[8px] font-black uppercase rounded-full shadow-lg shadow-blue-500/20">Melhor Oferta</span>}
+                           <div className="flex items-center justify-between">
+                             <div>
+                               <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">{pack.label}</p>
+                               <h5 className="text-xl font-bold dark:text-white">
+                                 {pack.amount} SC
+                                 <span className="text-sm ml-2 font-medium text-slate-500">por {pack.price}</span>
+                               </h5>
+                             </div>
+                             <div className="w-10 h-10 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center text-slate-400 group-hover:text-blue-500">
+                               <ChevronRight className="w-5 h-5" />
+                             </div>
+                           </div>
+                         </div>
+                       ))}
+                    </div>
+
+                    <div className="p-6 bg-slate-50 dark:bg-slate-800/30 rounded-3xl border border-slate-100 dark:border-slate-800">
+                       <div className="flex gap-4 items-start">
+                          <Bell className="w-5 h-5 text-blue-600 shrink-0" />
+                          <p className="text-[10px] text-slate-500 font-medium leading-relaxed">
+                            <strong>Aviso Sentinel:</strong> Créditos são consumidos apenas em análises de mídia complexa e textos longos com checagem cruzada profunda.
+                          </p>
+                       </div>
+                    </div>
+                  </div>
+               </div>
             </section>
           )}
 
@@ -1416,6 +2041,29 @@ export default function App() {
         </button>
       </div>
       <AnimatePresence>
+        {notifications.map((n) => (
+          <motion.div
+            key={n.id}
+            initial={{ opacity: 0, x: 50, scale: 0.9 }}
+            animate={{ opacity: 1, x: 0, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.9, transition: { duration: 0.2 } }}
+            className={`fixed top-6 right-6 z-[300] px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-4 min-w-[320px] backdrop-blur-xl border ${
+              n.type === 'success' ? 'bg-emerald-500/90 border-emerald-400 text-white' : 
+              n.type === 'error' ? 'bg-rose-500/90 border-rose-400 text-white' : 
+              'bg-blue-600/90 border-blue-500 text-white'
+            }`}
+          >
+            <div className="bg-white/20 p-2 rounded-full">
+              {n.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : 
+               n.type === 'error' ? <XCircle className="w-5 h-5" /> : 
+               <Bell className="w-5 h-5" />}
+            </div>
+            <p className="text-sm font-bold leading-tight">{n.message}</p>
+          </motion.div>
+        ))}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {showAuthModal && (
           <motion.div 
             initial={{ opacity: 0 }}
@@ -1452,17 +2100,30 @@ export default function App() {
 
                 <form onSubmit={handleManualAuth} className="space-y-4">
                   {authMethod === 'signup' && (
-                    <div className="relative">
-                      <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                      <input
-                        type="text"
-                        placeholder="Seu Nome Completo"
-                        required
-                        value={manualDisplayName}
-                        onChange={(e) => setManualDisplayName(e.target.value)}
-                        className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
-                      />
-                    </div>
+                    <>
+                      <div className="relative">
+                        <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                        <input
+                          type="text"
+                          placeholder="Seu Nome Completo"
+                          required
+                          value={manualDisplayName}
+                          onChange={(e) => setManualDisplayName(e.target.value)}
+                          className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
+                        />
+                      </div>
+                      <div className="relative">
+                        <Clock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                        <input
+                          type="date"
+                          placeholder="Data de Nascimento"
+                          required
+                          value={birthDate}
+                          onChange={(e) => setBirthDate(e.target.value)}
+                          className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
+                        />
+                      </div>
+                    </>
                   )}
 
                   <div className="relative">
@@ -1488,6 +2149,20 @@ export default function App() {
                       className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
                     />
                   </div>
+
+                  {authMethod === 'signup' && (
+                    <div className="relative">
+                      <Key className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                      <input
+                        type="password"
+                        placeholder="Repita sua senha"
+                        required
+                        value={confirmPassword}
+                        onChange={(e) => setConfirmPassword(e.target.value)}
+                        className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl py-3 pl-12 pr-4 text-sm outline-none focus:ring-2 ring-blue-500/20 transition-all dark:text-white"
+                      />
+                    </div>
+                  )}
 
                   <button 
                     type="submit"
